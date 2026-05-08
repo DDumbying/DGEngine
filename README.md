@@ -2,7 +2,7 @@
 
 DGEngine (Dumbest-Game-Engine) is a small game engine written in C for learning how game engines work internally.
 
-The project focuses on simplicity, readability, and low-level understanding rather than building a full-featured production engine.(i am not sure actually, how knows..)
+The project focuses on simplicity, readability, and low-level understanding rather than building a full-featured production engine.(i am not sure actually, who knows..)
 
 The main goal of DGEngine is to explore:
 - Rendering pipelines
@@ -24,7 +24,7 @@ Instead, it is designed to:
 - avoid unnecessary abstractions
 - teach low-level concepts through practice
 
-> i actually want to make something cool, but all reasources keep making me ask my self if i am a dumb by making something like that, But i mean, this is the main reason i made this org! to make the Dumbest things ever!
+> i actually want to build something cool, even if most reasources keep making me question my self if i am a dumb by making something like that?, But i mean, this is the main reason i made this org! to make the Dumbest things ever!
 
 ## Current Goals
 
@@ -40,9 +40,9 @@ Instead, it is designed to:
 
 ## Technologies
 
-For language i will use `C11`
+For language i will use `C11`.
 
-And for Libraries i will take:
+**And for Libraries i will take**:
 
 - SDL2
 - OpenGL
@@ -58,7 +58,7 @@ I will be documenting the entire learning and development journey [here](./docs/
 
 So even if the repository appears inactive at times, work and learning may still be happening behind the scenes.
 
-**Chess other Projects from here**:
+**See other Projects from here**:
 
 - [Dchess - Dumb Chess](https://github.com/DDumbying/Dchess).
 - [BTorrent - A BitTorrent Client built for fun(learn)](https://github.com/DDumbying/BTorrent).
