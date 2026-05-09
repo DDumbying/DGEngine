@@ -45,6 +45,9 @@ For language i will use `C11`.
 **And for Libraries i will take**:
 
 - SDL2
+
+> I think i will use ImGui for GUI. (um still thinking :BrainStorming:)
+
 - OpenGL
 - GLAD
 - stb_image
