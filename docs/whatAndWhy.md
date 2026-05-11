@@ -86,7 +86,7 @@ Most games need a window to run in. Even web games aren't exception: the window 
 
 That's whhat almost all ggames and game engines have in common though the loop itself might be hidden quite deep inside the engine. On a higher level, a game's code looks like:
 
-```
+```cpp
 int main()
 {
     createWindow();
@@ -105,5 +105,14 @@ This `while (gameIsRunning)` loop is the core game loop. It is what makes your g
 Again, there are many possibilities in exposing the loop in the engine's API. It may be completely explicit, i.e. the engine's user writes while `(engine::isRunning())` somewhere in their `main` function. It may be hidden inside the engine, e.g. in some `engine::run()` function, which in turn calls some functions that the user provides. Maybe the user subclasses an `engine::application` class and has to override some `application.update()` method that gets called from the `application.run()` method.
 
 Whaterver you choose, you need a game loop.
+
+### User Input
+
+One of things we typically do on each iteration of the game loop is process the player's inputs. Again this can be done using ugly platform-specific API, but most window-creating libs also provieds a platform-independent way of procecssing user input. It is sypically implemented as a `getNextEvent()` funtion (*Sometimes called `pollEvents()` or mth like that*).
+
+But how does the engine react to events? many possibilities here, again. Maybe it just exposes the underlying `getNextEvent()` function. Maybe it processes the events itself, calling the user's callbacks on the way, like `application.onMouseMove(x,y)`. Maybe it has special code for certain events, like updating the **OpenGL** viewport when theh window is resized, pausing theh game when theh window is our of focus, or quitting thhe game when theh window is closed. So many possibilities.
+
+The more special events the engine handles by itself, the easier it is to use the engine, but in some cases the engine's user might want to override this bahavior (like not quitting when requested, which is a deadly sin by theh way), so you might want to support overriding the default bahavior in your engine.
+
 
 
