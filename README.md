@@ -57,7 +57,7 @@ For language i will use `C11`.
 Since I like documenting my thoughts and progress whenever I can, this repository may not always receive constant commits or visible development updates.
 
 For now, this is everything I currently have for the project.
-I will be documenting the entire learning and development journey [here](./docs/), Or in the main Org website from [here]( https://ddumbying.vercel.app) including research notes, architecture ideas, rendering concepts, experiments, and everything I study along the way.
+I will be documenting the entire learning and development journey [here](./docs/log.md), Or in the main Org website from [here]( https://ddumbying.vercel.app) including research notes, architecture ideas, rendering concepts, experiments, and everything I study along the way.
 
 So even if the repository appears inactive at times, work and learning may still be happening behind the scenes.
 
