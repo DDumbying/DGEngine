@@ -1,8 +1,8 @@
 # DGEngine
 
-DGEngine (Dumbest Game Engine) **SHOULD BE** a small game engine written in C for learning how game engines work internally.
+DGEngine (Dumbest Game Engine) **SHOULD BE** a small game engine **OR** just a 3D simulator written in C for learning how this type of things work internally.
 
-The project focuses on simplicity, readability, and low-level understanding rather than building a full-featured production engine.(i am not sure actually, who knows..)
+The project focuses on simplicity, readability, and low-level understanding rather than building a full-featured production engine (i am not sure actually, who knows..).
 
 The main goal of DGEngine is to explore:
 - Rendering pipelines
