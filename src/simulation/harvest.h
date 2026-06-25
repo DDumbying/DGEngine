@@ -2,7 +2,7 @@
 #ifndef DGE_HARVEST_H
 #define DGE_HARVEST_H
 
-/*  Phase 5 — Harvest system
+/*  Harvest system
     Operates on entities that have all three of:
       Transform, Health, Resource
 

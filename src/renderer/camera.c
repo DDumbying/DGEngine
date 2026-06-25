@@ -30,11 +30,26 @@ void camera_zoom_at(Camera *c, float factor,
     /* Keep the world point under the cursor fixed. */
     Vec2 before = camera_screen_to_world(c, screen_x, screen_y);
 
-    c->zoom = dge_clampf(c->zoom * factor, 0.25f, 8.0f);
+    c->zoom = dge_clampf(c->zoom * factor, 0.05f, 8.0f);
 
     Vec2 after = camera_screen_to_world(c, screen_x, screen_y);
     c->position.x += before.x - after.x;
     c->position.y += before.y - after.y;
+}
+
+void camera_center_on_world(Camera *c, int world_w, int world_h,
+                             float tile_w, float tile_h) {
+    /* The isometric grid's screen-space bounding box:
+         top    tile is (0,   0)   -> screen y = 0
+         bottom tile is (W-1, H-1) -> screen y = (W+H-2) * tile_h/2
+         left   tile is (0,   H-1) -> screen x = -(H-1)  * tile_w/2
+         right  tile is (W-1, 0)   -> screen x =  (W-1)  * tile_w/2
+       Center of that box is symmetric in x (the iso grid is centered at x=0),
+       and halfway down the vertical span in y. tile_w isn't needed for the
+       center calculation because the x-span is symmetric around 0. */
+    (void)tile_w;
+    c->position.x = 0.0f;
+    c->position.y = (float)(world_w + world_h - 2) * tile_h * 0.25f;
 }
 
 Vec2 camera_screen_to_world(const Camera *c, float sx, float sy) {

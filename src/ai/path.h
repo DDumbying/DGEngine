@@ -18,4 +18,4 @@ typedef struct {
     int len;   /* number of valid steps; 0 = empty / unreachable */
 } Path;
 
-#endif /* DGE_PATH_H */
+#endif

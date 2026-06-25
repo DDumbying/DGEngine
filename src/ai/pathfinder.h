@@ -1,7 +1,7 @@
 #ifndef DGE_PATHFINDER_H
 #define DGE_PATHFINDER_H
 
-/*  Phase 6 — A* pathfinder on the tile grid.
+/*  A* pathfinder on the tile grid.
 
     Design choices that match the project philosophy:
     - 4-directional movement (N/S/E/W): simpler, correct for grid strategy.

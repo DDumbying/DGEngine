@@ -28,4 +28,11 @@ void camera_zoom_at(Camera *c, float factor, float screen_x, float screen_y);
 /* Convert screen coordinates to world coordinates. */
 Vec2 camera_screen_to_world(const Camera *c, float sx, float sy);
 
+/* Position the camera so the isometric bounding box of a world_w x world_h
+   tile grid is centered in the viewport at the given zoom level.
+   tile_w / tile_h are the renderer's current tile dimensions (pixels).
+   Call once after world creation or resize to give a sensible starting view. */
+void camera_center_on_world(Camera *c, int world_w, int world_h,
+                             float tile_w, float tile_h);
+
 #endif /* DGE_CAMERA_H */

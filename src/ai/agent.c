@@ -1,6 +1,7 @@
 #include "agent.h"
 #include "pathfinder.h"
 #include "../simulation/harvest.h"
+#include "../simulation/construction.h"
 #include "../core/log.h"
 #include <stdlib.h>
 #include <math.h>
@@ -71,6 +72,27 @@ void system_update_agents(Registry *reg, const World *world, ResourceStore *reso
                     LOG_INFO("Agent %u: harvest target at (%d, %d) depleted/gone", e, tsk->target_x, tsk->target_y);
                     tsk->kind = TASK_IDLE;
                 }
+            }
+            continue;
+        }
+
+        /* Check if we are adjacent to BUILD target. Unlike HARVEST,
+           there's no discrete "hit" to gate on a 1-second timer —
+           building is continuous labor, so every frame spent adjacent
+           contributes gdt directly via system_build_entity(). */
+        if (tsk->kind == TASK_BUILD && abs(cx - tsk->target_x) <= 1 && abs(cy - tsk->target_y) <= 1 && !m->moving) {
+            Entity blueprint = find_entity_at_tile(reg, tsk->target_x, tsk->target_y);
+            if (blueprint != ENTITY_NULL && reg->has_construction[blueprint]
+                && !reg->construction[blueprint].complete) {
+                if (system_build_entity(reg, blueprint, gdt)) {
+                    /* system_build_entity() already logged completion —
+                       no second log here, same as HARVEST's silent
+                       transition above when destroyed comes back true. */
+                    tsk->kind = TASK_IDLE;
+                }
+            } else {
+                LOG_INFO("Agent %u: build target at (%d, %d) missing/already complete", e, tsk->target_x, tsk->target_y);
+                tsk->kind = TASK_IDLE;
             }
             continue;
         }

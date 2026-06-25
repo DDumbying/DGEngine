@@ -1,6 +1,8 @@
 #ifndef DGE_COMPONENTS_H
 #define DGE_COMPONENTS_H
 
+#include "../core/object_def.h"
+
 /*  Plain data. No behavior lives on a component — behavior lives in
     systems, which read/write components by entity id. */
 
@@ -11,11 +13,12 @@ typedef struct {
 } TransformComponent;
 
 /* How to draw the entity: a colored box anchored to the bottom of its
-   tile, sized in pixels. Sprites/textures replace the color in Phase 4
-   once the interaction/resource systems give entities actual art. */
+   tile, sized in pixels. sprite_id >= 0 selects a sprite from the
+   active SpriteAtlas; -1 means color-box fallback (pre-Phase-E). */
 typedef struct {
     float r, g, b, a;
     float w, h;
+    int   sprite_id;   /* SpriteId from renderer/atlas.h, or -1 */
 } RenderableComponent;
 
 typedef struct {
@@ -56,6 +59,8 @@ typedef struct {
     TASK_IDLE      -- nothing to do.
     TASK_MOVE_TO   -- follow path[] to (target_x, target_y).
     TASK_HARVEST   -- move adjacent to target resource, then harvest it.
+    TASK_BUILD     -- move adjacent to a blueprint, then spend labor on it
+                      (see ConstructionComponent / system_build_entity).
     Path is embedded (not a pointer) so the component is a plain value
     type that save/load can handle without heap bookkeeping. */
 #include "../ai/path.h"
@@ -63,7 +68,8 @@ typedef struct {
 typedef enum {
     TASK_IDLE     = 0,
     TASK_MOVE_TO  = 1,
-    TASK_HARVEST  = 2
+    TASK_HARVEST  = 2,
+    TASK_BUILD    = 3
 } TaskKind;
 
 typedef struct {
@@ -73,5 +79,48 @@ typedef struct {
     int      path_step;            /* index into path.x/y, 0 = first   */
     float    timer;                /* general purpose cooldown/accumulator */
 } TaskComponent;
+
+/*  Construction: a placed "blueprint" that a worker must spend labor on
+    before it does anything. build_time_total/build_time_done are
+    seconds of worker labor, accumulated continuously every frame a
+    worker is adjacent and assigned (TASK_BUILD) — unlike harvesting,
+    there's no natural single "hit" to discretize into a timer-gated
+    tick, so this just adds dt directly via system_build_entity().
+    complete starts false and flips true exactly once, permanently, the
+    moment build_time_done reaches build_time_total; the same entity is
+    reused throughout (its RenderableComponent gets swapped to the
+    finished look on completion, see simulation/construction.c) rather
+    than destroying the blueprint and spawning a replacement. */
+typedef enum {
+    BUILDING_CAMPFIRE = 0,
+    BUILDING_COUNT
+} BuildingKind;
+
+typedef struct {
+    BuildingKind kind;
+    float        build_time_total;
+    float        build_time_done;
+    bool         complete;
+} ConstructionComponent;
+
+/*  Phase L->World: links a placed instance back to the user-defined
+    ObjectDef it was placed from (see core/object_def.h). Entities
+    spawned from the World tab's hardcoded prefabs (tree/rock/worker)
+    or the campfire blueprint do NOT have this — it exists only for
+    instances of objects the player actually defined in the Objects
+    tab, so systems can tell "built-in" and "user-defined" apart
+    without a separate flag.
+
+    Just the name, not a pointer to the ObjectDef itself: the registry
+    that owns ObjectDefs can reload from disk (Objects tab Save/Reload),
+    which would invalidate any pointer into it, and this component
+    needs to survive a save/load round-trip on its own (see
+    registry.h's binary format) where a raw pointer wouldn't mean
+    anything on the next run anyway. Whoever needs the live ObjectDef
+    looks it up by name through objdef_find() when it's actually
+    needed (e.g. a future Lua on_tick), instead of caching it here. */
+typedef struct {
+    char def_name[OBJDEF_NAME_MAX];
+} DefinitionComponent;
 
 #endif /* DGE_COMPONENTS_H */

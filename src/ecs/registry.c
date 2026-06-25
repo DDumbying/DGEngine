@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "../core/log.h"
+#include "../renderer/atlas.h"
 
 void registry_init(Registry *r) {
     memset(r, 0, sizeof(*r));
@@ -34,6 +35,8 @@ void entity_destroy(Registry *r, Entity e) {
     r->has_resource[e]  = false;
     r->has_move[e]      = false;
     r->has_task[e]      = false;
+    r->has_construction[e] = false;
+    r->has_definition[e]   = false;
     r->generation[e]++;
 
     r->free_list[r->free_count++] = e;
@@ -119,18 +122,47 @@ TaskComponent *entity_get_task(Registry *r, Entity e) {
     return &r->task[e];
 }
 
+void entity_add_construction(Registry *r, Entity e, ConstructionComponent c) {
+    if (!entity_alive(r, e)) return;
+    r->construction[e]     = c;
+    r->has_construction[e] = true;
+}
+
+ConstructionComponent *entity_get_construction(Registry *r, Entity e) {
+    if (!entity_alive(r, e) || !r->has_construction[e]) return NULL;
+    return &r->construction[e];
+}
+
+void entity_add_definition(Registry *r, Entity e, DefinitionComponent d) {
+    if (!entity_alive(r, e)) return;
+    r->definition[e]     = d;
+    r->has_definition[e] = true;
+}
+
+DefinitionComponent *entity_get_definition(Registry *r, Entity e) {
+    if (!entity_alive(r, e) || !r->has_definition[e]) return NULL;
+    return &r->definition[e];
+}
+
 /* ---------------------------------------------------------------------
    Save / load — see the format comment in registry.h. */
 
 #define DGEE_MAGIC   "DGEE"
-#define DGEE_VERSION 3u
+#define DGEE_VERSION 6u   /* Phase L: DefinitionComponent added; also fixed
+                             sprite_id never being written/read for
+                             RenderableComponent (latent since Phase E —
+                             every save/load round-trip was silently
+                             resetting it to whatever garbage happened
+                             to be on the stack) */
 
-#define MASK_TRANSFORM  (1u << 0)
-#define MASK_RENDERABLE (1u << 1)
-#define MASK_HEALTH     (1u << 2)
-#define MASK_RESOURCE   (1u << 3)
-#define MASK_MOVE       (1u << 4)
-#define MASK_TASK       (1u << 5)
+#define MASK_TRANSFORM     (1u << 0)
+#define MASK_RENDERABLE    (1u << 1)
+#define MASK_HEALTH        (1u << 2)
+#define MASK_RESOURCE      (1u << 3)
+#define MASK_MOVE          (1u << 4)
+#define MASK_TASK          (1u << 5)
+#define MASK_CONSTRUCTION  (1u << 6)
+#define MASK_DEFINITION    (1u << 7)
 
 bool registry_save(const Registry *r, const char *path) {
     FILE *f = fopen(path, "wb");
@@ -159,6 +191,8 @@ bool registry_save(const Registry *r, const char *path) {
         if (r->has_resource[e])   mask |= MASK_RESOURCE;
         if (r->has_move[e])       mask |= MASK_MOVE;
         if (r->has_task[e])       mask |= MASK_TASK;
+        if (r->has_construction[e]) mask |= MASK_CONSTRUCTION;
+        if (r->has_definition[e])   mask |= MASK_DEFINITION;
         ok &= fwrite(&mask, 1, 1, f) == 1;
 
         if (ok && (mask & MASK_TRANSFORM)) {
@@ -174,6 +208,7 @@ bool registry_save(const Registry *r, const char *path) {
             ok &= fwrite(&c->a, sizeof(c->a), 1, f) == 1;
             ok &= fwrite(&c->w, sizeof(c->w), 1, f) == 1;
             ok &= fwrite(&c->h, sizeof(c->h), 1, f) == 1;
+            ok &= fwrite(&c->sprite_id, sizeof(c->sprite_id), 1, f) == 1;
         }
         if (ok && (mask & MASK_HEALTH)) {
             const HealthComponent *h = &r->health[e];
@@ -196,6 +231,19 @@ bool registry_save(const Registry *r, const char *path) {
             ok &= fwrite(&kind_byte, sizeof(kind_byte), 1, f) == 1;
             ok &= fwrite(&t->target_x, sizeof(t->target_x), 1, f) == 1;
             ok &= fwrite(&t->target_y, sizeof(t->target_y), 1, f) == 1;
+        }
+        if (ok && (mask & MASK_CONSTRUCTION)) {
+            const ConstructionComponent *c = &r->construction[e];
+            unsigned char kind_byte = (unsigned char)c->kind;
+            unsigned char complete_byte = (unsigned char)(c->complete ? 1 : 0);
+            ok &= fwrite(&kind_byte,            1,                          1, f) == 1;
+            ok &= fwrite(&c->build_time_total,  sizeof(c->build_time_total), 1, f) == 1;
+            ok &= fwrite(&c->build_time_done,   sizeof(c->build_time_done),  1, f) == 1;
+            ok &= fwrite(&complete_byte,        1,                          1, f) == 1;
+        }
+        if (ok && (mask & MASK_DEFINITION)) {
+            const DefinitionComponent *d = &r->definition[e];
+            ok &= fwrite(d->def_name, 1, OBJDEF_NAME_MAX, f) == OBJDEF_NAME_MAX;
         }
     }
 
@@ -263,12 +311,23 @@ bool registry_load(Registry *r, const char *path) {
         }
         if ((mask & MASK_RENDERABLE)) {
             RenderableComponent c;
+            memset(&c, 0, sizeof(c));
             if (fread(&c.r, sizeof(c.r), 1, f) != 1) { ok = false; break; }
             if (fread(&c.g, sizeof(c.g), 1, f) != 1) { ok = false; break; }
             if (fread(&c.b, sizeof(c.b), 1, f) != 1) { ok = false; break; }
             if (fread(&c.a, sizeof(c.a), 1, f) != 1) { ok = false; break; }
             if (fread(&c.w, sizeof(c.w), 1, f) != 1) { ok = false; break; }
             if (fread(&c.h, sizeof(c.h), 1, f) != 1) { ok = false; break; }
+            if (version >= 6) {
+                /* Versions <6 never wrote this field at all (see the
+                   DGEE_VERSION comment) — reading it from a v<6 file
+                   would misalign every byte after it, so it's gated on
+                   the version actually stored in the file, not just
+                   the version this build knows how to write. */
+                if (fread(&c.sprite_id, sizeof(c.sprite_id), 1, f) != 1) { ok = false; break; }
+            } else {
+                c.sprite_id = SPRITE_NONE;
+            }
             entity_add_renderable(loaded, e, c);
         }
         if ((mask & MASK_HEALTH)) {
@@ -304,6 +363,24 @@ bool registry_load(Registry *r, const char *path) {
             t.path_step = 0;
             t.path.len = 0;
             entity_add_task(loaded, e, t);
+        }
+        if ((mask & MASK_CONSTRUCTION)) {
+            ConstructionComponent c;
+            unsigned char kind_byte, complete_byte;
+            if (fread(&kind_byte, 1, 1, f) != 1) { ok = false; break; }
+            if (fread(&c.build_time_total, sizeof(c.build_time_total), 1, f) != 1) { ok = false; break; }
+            if (fread(&c.build_time_done,  sizeof(c.build_time_done),  1, f) != 1) { ok = false; break; }
+            if (fread(&complete_byte, 1, 1, f) != 1) { ok = false; break; }
+            c.kind     = (BuildingKind)kind_byte;
+            c.complete = (complete_byte != 0);
+            entity_add_construction(loaded, e, c);
+        }
+        if ((mask & MASK_DEFINITION)) {
+            DefinitionComponent d;
+            memset(&d, 0, sizeof(d));
+            if (fread(d.def_name, 1, OBJDEF_NAME_MAX, f) != OBJDEF_NAME_MAX) { ok = false; break; }
+            d.def_name[OBJDEF_NAME_MAX - 1] = '\0'; /* guarantee NUL-termination regardless of file contents */
+            entity_add_definition(loaded, e, d);
         }
     }
     fclose(f);

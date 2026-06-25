@@ -5,7 +5,7 @@
 #include "../world/world.h"
 #include "../simulation/simulation.h"
 
-/*  Phase 6 — Agent System
+/*  Agent System
     Updates all agents in the registry.
     Agents are entities with:
       - TransformComponent (position)

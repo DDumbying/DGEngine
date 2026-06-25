@@ -42,6 +42,12 @@ typedef struct {
 
     bool has_task[MAX_ENTITIES];
     TaskComponent task[MAX_ENTITIES];
+
+    bool has_construction[MAX_ENTITIES];
+    ConstructionComponent construction[MAX_ENTITIES];
+
+    bool has_definition[MAX_ENTITIES];
+    DefinitionComponent definition[MAX_ENTITIES];
 } Registry;
 
 void registry_init(Registry *r);
@@ -76,6 +82,12 @@ MoveComponent *entity_get_move(Registry *r, Entity e);
 void entity_add_task(Registry *r, Entity e, TaskComponent t);
 TaskComponent *entity_get_task(Registry *r, Entity e);
 
+void entity_add_construction(Registry *r, Entity e, ConstructionComponent c);
+ConstructionComponent *entity_get_construction(Registry *r, Entity e);
+
+void entity_add_definition(Registry *r, Entity e, DefinitionComponent d);
+DefinitionComponent *entity_get_definition(Registry *r, Entity e);
+
 /*  Binary save/load for every alive entity + its components, independent
     of world.dge — terrain and entities are versioned separately so a
     format change to one never forces a re-save of the other.
@@ -83,16 +95,24 @@ TaskComponent *entity_get_task(Registry *r, Entity e);
     Format (little-endian, fields written individually, same reasoning
     as world.c's save format):
       char     magic[4] = "DGEE"
-      uint32   version  = 3
+      uint32   version  = 6
       uint32   count    (number of alive entities)
       then count records, each:
-        uint8  component_mask   (bit0=Transform bit1=Renderable bit2=Health bit3=Resource bit4=Move bit5=Task)
+        uint8  component_mask   (bit0=Transform bit1=Renderable bit2=Health
+                                  bit3=Resource bit4=Move bit5=Task
+                                  bit6=Construction bit7=Definition)
         [TransformComponent]    if bit0 set
-        [RenderableComponent]   if bit1 set
+        [RenderableComponent]   if bit1 set  (now includes sprite_id as
+                                  int32 — versions <6 wrote it without
+                                  sprite_id and always load as -1/none)
         [HealthComponent]       if bit2 set
         [ResourceComponent]     if bit3 set  (ResourceKind as uint8, yield_per_hit as int32)
         [MoveComponent speed]   if bit4 set  (float speed only — lerp state resets on load)
         [TaskComponent kind+tgt]if bit5 set  (TaskKind as uint8, target_x/y as int32; path recomputed)
+        [ConstructionComponent] if bit6 set  (BuildingKind as uint8, build_time_total
+                                  and build_time_done as float, complete as uint8)
+        [DefinitionComponent]   if bit7 set  (def_name as a fixed
+                                  OBJDEF_NAME_MAX-byte block, NUL-padded)
 
     load fully replaces the registry's contents (same contract as
     world_load): on failure the registry is left untouched. Entity ids

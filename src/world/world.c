@@ -82,6 +82,40 @@ void world_set_tile(World *w, int x, int y, TerrainType type) {
     if (t) t->type = type;
 }
 
+void world_clear(World *w) {
+    for (int i = 0; i < w->width * w->height; i++) {
+        w->tiles[i].type    = TERRAIN_GRASS;
+        w->tiles[i].variant = 0;
+        w->tiles[i].height  = 0.0f;
+    }
+    LOG_INFO("World cleared (%dx%d)", w->width, w->height);
+}
+
+bool world_resize(World *w, int new_w, int new_h) {
+    if (new_w <= 0 || new_h <= 0) {
+        LOG_ERROR("world_resize: invalid size %dx%d", new_w, new_h);
+        return false;
+    }
+    Tile *new_tiles = calloc((size_t)new_w * (size_t)new_h, sizeof(Tile));
+    if (!new_tiles) {
+        LOG_ERROR("world_resize: allocation failed for %dx%d", new_w, new_h);
+        return false;
+    }
+    /* Copy tiles that exist in both old and new bounds; rest stay zeroed
+       (TERRAIN_GRASS, variant 0) from calloc. */
+    int copy_w = (new_w < w->width)  ? new_w : w->width;
+    int copy_h = (new_h < w->height) ? new_h : w->height;
+    for (int y = 0; y < copy_h; y++)
+        for (int x = 0; x < copy_w; x++)
+            new_tiles[y * new_w + x] = w->tiles[y * w->width + x];
+    free(w->tiles);
+    w->tiles  = new_tiles;
+    w->width  = new_w;
+    w->height = new_h;
+    LOG_INFO("World resized to %dx%d", new_w, new_h);
+    return true;
+}
+
 /* ---------------------------------------------------------------------
    Generation */
 

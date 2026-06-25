@@ -4,7 +4,7 @@
 
 #include <stdbool.h>
 
-/*  Phase 5 — Simulation
+/*  Simulation
     Two things live here:
 
     1. SimClock  — an in-world time counter, completely separate from the
@@ -53,7 +53,47 @@ void resource_store_init(ResourceStore *rs);
 void resource_store_add_wood(ResourceStore *rs, int amount);
 void resource_store_add_stone(ResourceStore *rs, int amount);
 
+/* Read-only affordability checks. */
+bool resource_store_has_wood(const ResourceStore *rs, int amount);
+bool resource_store_has_stone(const ResourceStore *rs, int amount);
+
+/*  Atomic check-and-subtract: returns false (no change, no log) if the
+    store doesn't have at least `amount`; otherwise subtracts and logs.
+    This is deliberately different from resource_store_add_wood/stone's
+    unconditional clamp-at-0 behavior — passing a negative amount there
+    silently clamps instead of rejecting, which is wrong for "can I
+    afford this" callers (construction.c) that need a real yes/no
+    before committing to spending. */
+bool resource_store_try_spend_wood(ResourceStore *rs, int amount);
+bool resource_store_try_spend_stone(ResourceStore *rs, int amount);
+
 /* Log current totals — called on any change and available on demand. */
 void resource_store_log(const ResourceStore *rs);
+
+/*  Binary save/load for SimClock + ResourceStore together. They're
+    declared in the same header and conceptually one "session state"
+    blob (how much time has passed, what's in the stockpile), so one
+    small file rather than two — the same reasoning registry.c uses
+    for bundling several component types into one entities.dge rather
+    than one file per component.
+
+    Own file (sim.dge), independent of world.dge/entities.dge, same
+    "each subsystem owns its serialization" pattern as the rest of the
+    engine. Format, magic+version style matching world.c/registry.c:
+      char   magic[4] = "DGES"
+      uint32 version  = 1
+      double elapsed
+      float  speed
+      float  saved_speed
+      int32  wood
+      int32  stone
+
+    speed/saved_speed are both persisted (not just elapsed) so saving
+    while paused and reloading stays paused, and resuming afterward
+    restores the speed you actually had before pausing — not a reset
+    to 1x. Version mismatch is a hard failure, same policy as
+    world_load: no migration support, by choice. */
+bool simulation_save(const SimClock *clk, const ResourceStore *rs, const char *path);
+bool simulation_load(SimClock *clk, ResourceStore *rs, const char *path);
 
 #endif /* DGE_SIMULATION_H */

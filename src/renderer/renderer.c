@@ -32,8 +32,11 @@ static const char *FRAG_SRC =
     "in vec4 v_color;\n"
     "in vec2 v_uv;\n"
     "out vec4 frag_color;\n"
+    "uniform sampler2D u_texture;\n"
+    "uniform float     u_use_texture;\n"   /* 0.0 = color only, 1.0 = textured */
     "void main() {\n"
-    "    frag_color = v_color;\n"  /* texture support added in Phase 2 */
+    "    vec4 tex = texture(u_texture, v_uv);\n"
+    "    frag_color = mix(v_color, v_color * tex, u_use_texture);\n"
     "}\n";
 
 /* ---- State ---- */
@@ -110,6 +113,14 @@ bool renderer_init(void) {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
+    /* Set texture sampler to unit 0 and default to color-only mode.
+       These uniforms stay constant unless a textured draw call toggles
+       u_use_texture — see renderer_draw_iso_sprite_textured().        */
+    shader_bind(&s_shader);
+    shader_set_int(&s_shader, "u_texture", 0);
+    shader_set_float(&s_shader, "u_use_texture", 0.0f);
+    shader_unbind();
+
     LOG_INFO("Renderer initialised (max quads: %d)", MAX_QUADS);
     return true;
 }
@@ -132,6 +143,54 @@ void renderer_begin(const Camera *c) {
 void renderer_end(void) {
     flush();
     shader_unbind();
+}
+
+void renderer_begin_ui(int viewport_w, int viewport_h) {
+    flush(); /* preserve draw order: world quads batched so far go out first */
+
+    glViewport(0, 0, viewport_w, viewport_h);
+    shader_bind(&s_shader);
+
+    /* top=0,bottom=viewport_h gives top-left origin / y-down, matching
+       the mouse-position convention the rest of the engine already uses. */
+    s_vp = mat4_ortho(0.0f, (float)viewport_w, (float)viewport_h, 0.0f, -1.0f, 1.0f);
+    shader_set_mat4(&s_shader, "u_vp", mat4_ptr(&s_vp));
+}
+
+void renderer_draw_iso_sprite_textured(float gx, float gy, float w, float h,
+                                        float r, float g, float b, float a,
+                                        const Texture *tex, UVRect uv) {
+    /* Flush whatever is batched before switching texture state.
+       This preserves draw order and ensures color-only quads that
+       were submitted since the last flush aren't sampled with our
+       texture instead of the white 1x1 default. */
+    flush();
+
+    /* Bind texture to unit 0, enable texture mode. */
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex->id);
+    shader_set_float(&s_shader, "u_use_texture", 1.0f);
+
+    /* Sprite geometry — same anchor as renderer_draw_iso_sprite. */
+    float cx           = (gx - gy) * (s_tile_w * 0.5f);
+    float cy           = (gx + gy) * (s_tile_h * 0.5f);
+    float tile_surface = cy - (s_tile_h * 0.25f);
+    float ax           = cx - w * 0.5f;
+    float ay           = tile_surface - h;
+
+    if (s_quad_count >= MAX_QUADS) flush();
+    float *v = s_verts + s_quad_count * VERTS_PER_QUAD * FLOATS_PER_VERT;
+
+    v[ 0]=ax;   v[ 1]=ay;   v[ 2]=r; v[ 3]=g; v[ 4]=b; v[ 5]=a; v[ 6]=uv.u0; v[ 7]=uv.v0;
+    v[ 8]=ax+w; v[ 9]=ay;   v[10]=r; v[11]=g; v[12]=b; v[13]=a; v[14]=uv.u1; v[15]=uv.v0;
+    v[16]=ax+w; v[17]=ay+h; v[18]=r; v[19]=g; v[20]=b; v[21]=a; v[22]=uv.u1; v[23]=uv.v1;
+    v[24]=ax;   v[25]=ay+h; v[26]=r; v[27]=g; v[28]=b; v[29]=a; v[30]=uv.u0; v[31]=uv.v1;
+    s_quad_count++;
+
+    /* Flush and restore color-only mode so subsequent calls are clean. */
+    flush();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    shader_set_float(&s_shader, "u_use_texture", 0.0f);
 }
 
 void renderer_clear(float r, float g, float b) {
@@ -165,6 +224,23 @@ void renderer_set_tile_size(float tw, float th) {
 void renderer_get_tile_size(float *out_w, float *out_h) {
     *out_w = s_tile_w;
     *out_h = s_tile_h;
+}
+
+void renderer_grid_to_screen(float gx, float gy, float *out_x, float *out_y) {
+    *out_x = (gx - gy) * (s_tile_w * 0.5f);
+    *out_y = (gx + gy) * (s_tile_h * 0.5f);
+}
+
+void renderer_world_to_grid(float wx, float wy, float *out_gx, float *out_gy) {
+    /* Solve the renderer_grid_to_screen() system for (gx, gy):
+         a = 2*wx/tile_w = gx - gy
+         b = 2*wy/tile_h = gx + gy
+         gx = (a + b) / 2
+         gy = (b - a) / 2                                              */
+    float a = (2.0f * wx) / s_tile_w;
+    float b = (2.0f * wy) / s_tile_h;
+    *out_gx = (a + b) * 0.5f;
+    *out_gy = (b - a) * 0.5f;
 }
 
 /*  Standard 2:1 isometric projection.

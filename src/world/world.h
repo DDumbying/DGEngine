@@ -23,6 +23,15 @@ const Tile *world_get_tile(const World *w, int x, int y);
 Tile       *world_get_tile_mut(World *w, int x, int y);
 void        world_set_tile(World *w, int x, int y, TerrainType type);
 
+/* Fill every tile with TERRAIN_GRASS, variant 0 — blank authoring canvas. */
+void world_clear(World *w);
+
+/* Resize to new_w x new_h, preserving tiles that fit in the new bounds,
+   filling any new area with TERRAIN_GRASS. Existing tile pointer is freed
+   and reallocated; returns false on allocation failure (world left
+   untouched in that case). */
+bool world_resize(World *w, int new_w, int new_h);
+
 /* Procedural terrain fill. Deterministic for a given seed — same seed
    always produces the same map, which matters once save files exist. */
 void world_generate(World *w, unsigned int seed);
