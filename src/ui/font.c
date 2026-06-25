@@ -56,7 +56,7 @@ static const Glyph GLYPHS[] = {
     {'+', {".....","..#..","..#..","#####","..#..","..#..","....."}},
     {'(', {"...#.","..#..",".#...",".#...",".#...","..#..","...#."}},
     {')', {".#...","..#..","...#.","...#.","...#.","..#..",".#..."}},
-    /* first thing the engine lets you type freely (object
+    /* Phase H — first thing the engine lets you type freely (object
        names, sprite names, paths). "_" is the one separator every
        planned naming convention in the roadmap actually uses
        (tree_trunk, goblin_idle, ...) and it had no glyph at all before

@@ -1,7 +1,7 @@
 #ifndef DGE_SETTINGS_TAB_H
 #define DGE_SETTINGS_TAB_H
 
-/*  Settings tab.
+/*  Phase O — Settings tab.
     Project name rename, grid resize inputs, tile pixel dimensions. */
 
 #include <stdbool.h>

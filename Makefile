@@ -64,7 +64,7 @@ $(TEST_DIR)/test_simulation: tests/test_simulation.c src/simulation/simulation.c
 	@mkdir -p $(TEST_DIR)
 	$(CC) $(CFLAGS_DEBUG) $(INCLUDES) $^ -o $@ -lm
 
-$(TEST_DIR)/test_construction: tests/test_construction.c src/simulation/construction.c src/simulation/simulation.c src/ecs/registry.c src/core/log.c
+$(TEST_DIR)/test_construction: tests/test_construction.c src/simulation/construction.c src/simulation/simulation.c src/ecs/registry.c src/core/log.c src/core/object_def.c
 	@mkdir -p $(TEST_DIR)
 	$(CC) $(CFLAGS_DEBUG) $(INCLUDES) $^ -o $@ -lm
 

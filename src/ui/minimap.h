@@ -5,7 +5,7 @@
 #include "../ecs/registry.h"
 #include "../renderer/camera.h"
 
-/*  A flat, non-isometric top-down projection of the world —
+/*  Phase D. A flat, non-isometric top-down projection of the world —
     deliberately NOT using the iso math the main view does, because the
     point of a minimap is to show the whole canvas's shape at a glance,
     and a 2:1 iso diamond of the same data is harder to read at 160px

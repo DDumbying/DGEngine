@@ -239,6 +239,29 @@ void editor_update(Editor *ed, Registry *reg, World *world, const Camera *cam,
                     if (!objdef_load_file(&def, path)) {
                         LOG_WARN("Could not reload object definition '%s' (was it deleted/renamed "
                                  "in the Objects tab?) — placement cancelled", ed->place_def_name);
+                    } else if (objdef_is_buildable(&def)) {
+                        if (!objdef_try_pay_build_cost(resources, &def)) {
+                            ResourceKind ck; int cost; float bt;
+                            objdef_get_build_spec(&def, &ck, &cost, &bt);
+                            LOG_WARN("Not enough resources to build '%s' (need %d %s)",
+                                     def.name, cost, ck == RESOURCE_WOOD ? "wood" : "stone");
+                        } else {
+                            Entity e = construction_place_blueprint_objdef(
+                                reg, &def, ed->place_sprite_id,
+                                (float)ed->hover_gx, (float)ed->hover_gy);
+                            if (e != ENTITY_NULL) {
+                                LOG_INFO("Blueprint placed: '%s' at (%d, %d) — assign a worker "
+                                         "(SELECT mode, M) to build it", def.name,
+                                         ed->hover_gx, ed->hover_gy);
+                            } else {
+                                /* Same refund reasoning as the BuildingKind
+                                   path above — paid before spawning, so a
+                                   full-registry failure has to be undone
+                                   here rather than left as a silent charge. */
+                                objdef_refund_build_cost(resources, &def);
+                                LOG_WARN("Could not place blueprint — registry full (cost refunded)");
+                            }
+                        }
                     } else {
                         Entity e = objdef_spawn_instance(reg, &def, ed->place_sprite_id,
                                                           (float)ed->hover_gx, (float)ed->hover_gy);

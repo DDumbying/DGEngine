@@ -5,7 +5,7 @@
 #include "../editor/editor.h"
 #include "../simulation/simulation.h"
 
-/*  the first clickable UI. Before this, editor.c was driven
+/*  Phase C — the first clickable UI. Before this, editor.c was driven
     entirely by keyboard shortcuts (TAB, 1-5, M, H...) with no visible
     affordance for what any of them did. panel.c doesn't replace that
     input path — every shortcut still works exactly as before — it adds

@@ -393,7 +393,16 @@ void panel_render(const Panel *p, const Editor *ed, const ResourceStore *resourc
             const ObjectDef *def = &obj_registry->defs[i];
             Rect cr = { margin, y, btn_w, btn_h };
             bool active = ed->placing_custom && strcmp(ed->place_def_name, def->name) == 0;
-            draw_button(cr, def->name, active, true);
+            char label[80];
+            if (objdef_is_buildable(def)) {
+                ResourceKind ck; int cost; float bt;
+                objdef_get_build_spec(def, &ck, &cost, &bt);
+                snprintf(label, sizeof(label), "%s (%d %s)", def->name, cost,
+                         ck == RESOURCE_WOOD ? "wood" : "stone");
+            } else {
+                snprintf(label, sizeof(label), "%s", def->name);
+            }
+            draw_button(cr, label, active, true);
             y += btn_h + gap;
         }
         if (obj_registry->count == 0) {

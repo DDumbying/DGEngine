@@ -1,7 +1,7 @@
 #ifndef DGE_OBJECTS_TAB_H
 #define DGE_OBJECTS_TAB_H
 
-/*  Object Editor tab.
+/*  Phase L — Object Editor tab.
 
     Three-column layout (within the content area below TABBAR_H):
       LEFT   — scrollable list of defined objects + [+ New] button

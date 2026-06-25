@@ -95,7 +95,7 @@ DefinitionComponent *entity_get_definition(Registry *r, Entity e);
     Format (little-endian, fields written individually, same reasoning
     as world.c's save format):
       char     magic[4] = "DGEE"
-      uint32   version  = 6
+      uint32   version  = 7
       uint32   count    (number of alive entities)
       then count records, each:
         uint8  component_mask   (bit0=Transform bit1=Renderable bit2=Health
@@ -110,7 +110,10 @@ DefinitionComponent *entity_get_definition(Registry *r, Entity e);
         [MoveComponent speed]   if bit4 set  (float speed only — lerp state resets on load)
         [TaskComponent kind+tgt]if bit5 set  (TaskKind as uint8, target_x/y as int32; path recomputed)
         [ConstructionComponent] if bit6 set  (BuildingKind as uint8, build_time_total
-                                  and build_time_done as float, complete as uint8)
+                                  and build_time_done as float, complete as uint8,
+                                  then -- versions <7 stop here, is_custom defaults
+                                  false -- is_custom as uint8, def_name as a fixed
+                                  OBJDEF_NAME_MAX-byte block, NUL-padded)
         [DefinitionComponent]   if bit7 set  (def_name as a fixed
                                   OBJDEF_NAME_MAX-byte block, NUL-padded)
 

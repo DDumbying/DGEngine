@@ -16,7 +16,7 @@ static int  s_mouse_dx, s_mouse_dy;   /* delta this frame, reset each frame */
 static int  s_scroll_x, s_scroll_y;
 static bool s_quit;
 
-/* text typed this frame. 32 bytes is generous for "a few
+/* Phase H — text typed this frame. 32 bytes is generous for "a few
    SDL_TEXTINPUT events worth of fast typing", which is all this ever
    needs to hold; it's read and consumed (by a focused TextInput, if
    any) well before next frame. */

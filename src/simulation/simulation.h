@@ -4,7 +4,7 @@
 
 #include <stdbool.h>
 
-/*  Simulation
+/*  Phase 5 — Simulation
     Two things live here:
 
     1. SimClock  — an in-world time counter, completely separate from the
@@ -41,6 +41,16 @@ void simclock_resume(SimClock *clk);
 bool simclock_is_paused(const SimClock *clk);
 
 /* ---- ResourceStore ---- */
+
+/* Moved here from ecs/components.h: ResourceComponent uses this, but so
+   does core/object_def.h's objdef_get_build_spec() (build_cost_kind),
+   and object_def.h can't include components.h without a cycle
+   (components.h includes object_def.h for OBJDEF_NAME_MAX). This header
+   has no includes of its own, so it's the one place both reach safely. */
+typedef enum {
+    RESOURCE_WOOD  = 0,
+    RESOURCE_STONE = 1
+} ResourceKind;
 
 typedef struct {
     int wood;

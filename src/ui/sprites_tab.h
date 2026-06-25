@@ -1,7 +1,7 @@
 #ifndef DGE_SPRITES_TAB_H
 #define DGE_SPRITES_TAB_H
 
-/*  Sprite Manager tab.
+/*  Phase K — Sprite Manager tab.
 
     Displays the loaded sprite atlas as a clickable grid of cells.
     Clicking a cell selects it; the inspector on the right lets you

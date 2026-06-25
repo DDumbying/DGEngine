@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include "../ecs/registry.h"
 #include "../renderer/camera.h"
+#include "../core/object_def.h"
 #include "simulation.h"
 
 /*  Construction (the deferred half of the original Phase 5 plan).
@@ -41,6 +42,18 @@ bool building_can_afford(const ResourceStore *rs, BuildingKind kind);
    as resource_store_try_spend_wood/stone. */
 bool building_try_pay_cost(ResourceStore *rs, BuildingKind kind);
 
+/* Same three-function shape as building_can_afford()/building_try_pay_cost()
+   above, for objdef_is_buildable() objects -- see objdef_get_build_spec()
+   in core/object_def.h for where the resolved cost comes from. */
+bool objdef_can_afford_build(const ResourceStore *rs, const ObjectDef *def);
+bool objdef_try_pay_build_cost(ResourceStore *rs, const ObjectDef *def);
+/* Undoes objdef_try_pay_build_cost() -- same "registry was full after we
+   already paid" refund case the BuildingKind path handles inline in
+   editor.c; this one's a function instead of inline math purely so the
+   cost-resolution logic (objdef_get_build_spec) lives in exactly one
+   place rather than being re-derived at each of the three call sites. */
+void objdef_refund_build_cost(ResourceStore *rs, const ObjectDef *def);
+
 /*  Spawns a blueprint entity at grid position (gx, gy) with
     ConstructionComponent{kind, build_time_total = building_build_time(kind),
     build_time_done = 0, complete = false}.
@@ -56,6 +69,17 @@ bool building_try_pay_cost(ResourceStore *rs, BuildingKind kind);
     (editor.c's placement handler) that has to reason about the
     refund-on-failure case. */
 Entity construction_place_blueprint(Registry *reg, BuildingKind kind, float gx, float gy);
+
+/*  Sibling of construction_place_blueprint() for objdef_is_buildable()
+    objects (see core/object_def.h) instead of a hardcoded BuildingKind
+    — same contract: caller pays first (building_objdef_can_afford() /
+    a resource_store_try_spend_* call using objdef_get_build_spec()'s
+    resolved kind/amount), this only spawns. sprite_id is resolved by
+    the caller the same way objdef_spawn_instance() expects (panel.c
+    already has the SpritesTab lookup) — pass SPRITE_NONE if it didn't
+    resolve, same fallback as the instant-placement path. */
+Entity construction_place_blueprint_objdef(Registry *reg, const ObjectDef *def,
+                                            int sprite_id, float gx, float gy);
 
 /*  One frame's worth of labor on a blueprint. Adds labor_seconds to its
     build_time_done; if that crosses build_time_total, flips complete

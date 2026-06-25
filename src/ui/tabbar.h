@@ -1,7 +1,7 @@
 #ifndef DGE_TABBAR_H
 #define DGE_TABBAR_H
 
-/*  Top tab bar.
+/*  Phase J — Top tab bar.
 
     A fixed-height strip at the top of the editor (y=0, x=0..vw).
     Five tabs: World / Objects / Sprites / Scripts / Settings.

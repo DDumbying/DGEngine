@@ -148,12 +148,13 @@ DefinitionComponent *entity_get_definition(Registry *r, Entity e) {
    Save / load — see the format comment in registry.h. */
 
 #define DGEE_MAGIC   "DGEE"
-#define DGEE_VERSION 6u   /* Phase L: DefinitionComponent added; also fixed
-                             sprite_id never being written/read for
-                             RenderableComponent (latent since Phase E —
-                             every save/load round-trip was silently
-                             resetting it to whatever garbage happened
-                             to be on the stack) */
+#define DGEE_VERSION 7u   /* Phase: construction hookup for user-defined
+                             buildable objects -- ConstructionComponent
+                             gained is_custom + def_name. Phase L's
+                             version 6 also lives here (DefinitionComponent
+                             added; fixed sprite_id never being written/
+                             read for RenderableComponent, a latent bug
+                             since Phase E) */
 
 #define MASK_TRANSFORM     (1u << 0)
 #define MASK_RENDERABLE    (1u << 1)
@@ -236,10 +237,13 @@ bool registry_save(const Registry *r, const char *path) {
             const ConstructionComponent *c = &r->construction[e];
             unsigned char kind_byte = (unsigned char)c->kind;
             unsigned char complete_byte = (unsigned char)(c->complete ? 1 : 0);
+            unsigned char custom_byte = (unsigned char)(c->is_custom ? 1 : 0);
             ok &= fwrite(&kind_byte,            1,                          1, f) == 1;
             ok &= fwrite(&c->build_time_total,  sizeof(c->build_time_total), 1, f) == 1;
             ok &= fwrite(&c->build_time_done,   sizeof(c->build_time_done),  1, f) == 1;
             ok &= fwrite(&complete_byte,        1,                          1, f) == 1;
+            ok &= fwrite(&custom_byte,           1,                          1, f) == 1;
+            ok &= fwrite(c->def_name,            1,             OBJDEF_NAME_MAX, f) == OBJDEF_NAME_MAX;
         }
         if (ok && (mask & MASK_DEFINITION)) {
             const DefinitionComponent *d = &r->definition[e];
@@ -366,6 +370,7 @@ bool registry_load(Registry *r, const char *path) {
         }
         if ((mask & MASK_CONSTRUCTION)) {
             ConstructionComponent c;
+            memset(&c, 0, sizeof(c));
             unsigned char kind_byte, complete_byte;
             if (fread(&kind_byte, 1, 1, f) != 1) { ok = false; break; }
             if (fread(&c.build_time_total, sizeof(c.build_time_total), 1, f) != 1) { ok = false; break; }
@@ -373,6 +378,19 @@ bool registry_load(Registry *r, const char *path) {
             if (fread(&complete_byte, 1, 1, f) != 1) { ok = false; break; }
             c.kind     = (BuildingKind)kind_byte;
             c.complete = (complete_byte != 0);
+            if (version >= 7) {
+                /* Versions <7 never wrote these (see the DGEE_VERSION
+                   comment) -- gated on the file's own version, same
+                   reasoning as the sprite_id gate above. */
+                unsigned char custom_byte;
+                if (fread(&custom_byte, 1, 1, f) != 1) { ok = false; break; }
+                if (fread(c.def_name, 1, OBJDEF_NAME_MAX, f) != OBJDEF_NAME_MAX) { ok = false; break; }
+                c.is_custom = (custom_byte != 0);
+                c.def_name[OBJDEF_NAME_MAX - 1] = '\0';
+            } else {
+                c.is_custom = false;
+                c.def_name[0] = '\0';
+            }
             entity_add_construction(loaded, e, c);
         }
         if ((mask & MASK_DEFINITION)) {

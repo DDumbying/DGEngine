@@ -2,6 +2,7 @@
 #define DGE_COMPONENTS_H
 
 #include "../core/object_def.h"
+#include "../simulation/simulation.h"
 
 /*  Plain data. No behavior lives on a component — behavior lives in
     systems, which read/write components by entity id. */
@@ -30,12 +31,14 @@ typedef struct {
     per harvest stroke.  Two types are enough for now.
     yield_per_hit is deducted from the entity's HealthComponent each time
     a harvest action fires; if health reaches 0 the entity is destroyed
-    and the resources credited to the ResourceStore. */
-typedef enum {
-    RESOURCE_WOOD  = 0,
-    RESOURCE_STONE = 1
-} ResourceKind;
+    and the resources credited to the ResourceStore.
 
+    ResourceKind itself now lives in simulation/simulation.h, not here —
+    core/object_def.h's objdef_get_build_spec() needed it too (for
+    build_cost_kind), and object_def.h can't include this header to get
+    it (this header already includes object_def.h, for OBJDEF_NAME_MAX
+    on DefinitionComponent below). simulation.h has no includes of its
+    own, so it's the one place both sides can reach without a cycle. */
 typedef struct {
     ResourceKind kind;
     int          yield_per_hit; /* resources credited per successful chop/mine */
@@ -101,6 +104,17 @@ typedef struct {
     float        build_time_total;
     float        build_time_done;
     bool         complete;
+
+    /*  Construction hookup for user-defined buildable objects (see
+        objdef_is_buildable() in core/object_def.h): is_custom==true
+        means kind is meaningless and def_name names the ObjectDef
+        instead. kind stays a plain BuildingKind (not folded into a
+        tagged union) because every existing BUILDING_CAMPFIRE call
+        site already switches on it directly — adding a third "which
+        union member is active" branch everywhere would touch more
+        code than this one extra bool+string does. */
+    bool         is_custom;
+    char         def_name[OBJDEF_NAME_MAX];
 } ConstructionComponent;
 
 /*  Phase L->World: links a placed instance back to the user-defined

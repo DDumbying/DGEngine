@@ -225,3 +225,33 @@ ObjectDef *objdef_find(ObjectDefRegistry *r, const char *name) {
             return &r->defs[i];
     return NULL;
 }
+
+/* Local property lookup -- prefabs.c has its own copy of this same
+   shape for the same reason (different translation unit, ~10 lines,
+   not worth a shared header just for this). See its comment for why
+   "wrong type" is treated the same as "absent" rather than erroring. */
+static const ObjectProperty *find_prop(const ObjectDef *def, const char *name, PropertyType type) {
+    for (int i = 0; i < def->prop_count; i++) {
+        if (def->props[i].type == type && strcmp(def->props[i].name, name) == 0)
+            return &def->props[i];
+    }
+    return NULL;
+}
+
+bool objdef_is_buildable(const ObjectDef *def) {
+    return find_prop(def, "build_time", PROP_FLOAT) != NULL;
+}
+
+void objdef_get_build_spec(const ObjectDef *def, ResourceKind *out_cost_kind,
+                            int *out_cost_amount, float *out_build_time) {
+    const ObjectProperty *bt = find_prop(def, "build_time", PROP_FLOAT);
+    *out_build_time = bt ? bt->value.as_float : 0.0f;
+
+    const ObjectProperty *kind_prop = find_prop(def, "build_cost_kind", PROP_STRING);
+    *out_cost_kind = RESOURCE_WOOD; /* default, including when kind_prop names anything else */
+    if (kind_prop && strcmp(kind_prop->value.as_string, "stone") == 0)
+        *out_cost_kind = RESOURCE_STONE;
+
+    const ObjectProperty *amount_prop = find_prop(def, "build_cost_amount", PROP_INT);
+    *out_cost_amount = amount_prop ? amount_prop->value.as_int : 0;
+}
