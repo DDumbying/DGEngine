@@ -113,5 +113,5 @@ So even if the repository appears inactive at times, work and learning may still
 **See other Projects from here**:
 
 - [Dchess - Dumb Chess](https://github.com/DDumbying/Dchess).
-- [BTorrent - A BitTorrent Client built for fun(learn)](https://github.com/DDumbying/BTorrent).
+- [BTorrent - A BitTorrent Client built for fun (learn)](https://github.com/DDumbying/BTorrent).
 
