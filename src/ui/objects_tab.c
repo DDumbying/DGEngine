@@ -9,6 +9,7 @@
 #include "../core/log.h"
 #include "text.h"
 #include "tabbar.h"
+#include "layout.h"
 
 /* Layout */
 #define LIST_W    180.0f
@@ -183,20 +184,7 @@ void objects_tab_update(ObjectsTab*ot,int vw,int vh){
     if(ot->selected_idx<0) return;
 
     /* --- Inspector active field update --- */
-    float insp_x=(float)vw-INSP_W+PAD;
-    switch(ot->focus){
-        case OBJ_FOCUS_NAME:   textinput_update(&ot->fi_name,  insp_x,0,INSP_W-PAD*2,SCALE_BODY); break;
-        case OBJ_FOCUS_SPRITE: textinput_update(&ot->fi_sprite,insp_x,0,INSP_W-PAD*2,SCALE_BODY); break;
-        case OBJ_FOCUS_PROP_NAME:
-            textinput_update(&ot->fi_prop_name[ot->focus_idx],insp_x,0,INSP_W*0.45f,SCALE_BODY); break;
-        case OBJ_FOCUS_PROP_VALUE:
-            textinput_update(&ot->fi_prop_value[ot->focus_idx],insp_x,0,INSP_W*0.45f,SCALE_BODY); break;
-        case OBJ_FOCUS_BEHAV_EVENT:
-            textinput_update(&ot->fi_behav_event[ot->focus_idx],insp_x,0,INSP_W*0.45f,SCALE_BODY); break;
-        case OBJ_FOCUS_BEHAV_SCRIPT:
-            textinput_update(&ot->fi_behav_script[ot->focus_idx],insp_x,0,INSP_W*0.5f,SCALE_BODY); break;
-        default: break;
-    }
+    /* Handled by ui_layout_field in objects_tab_render now! */
     (void)vw;
 }
 
@@ -246,53 +234,39 @@ void objects_tab_render(const ObjectsTab*ot,int vw,int vh){
     renderer_draw_quad(ix,CONTENT_Y,INSP_W,(float)vh-CONTENT_Y,0.09f,0.09f,0.11f,1);
     renderer_draw_quad(ix,CONTENT_Y,1,(float)vh-CONTENT_Y,0.22f,0.22f,0.28f,1);
 
-    float iy2=CONTENT_Y+PAD;
+    UILayout l;
+    ui_layout_begin(&l, ix + PAD, CONTENT_Y + PAD, INSP_W - PAD * 2.0f);
+
     /* Name */
-    text_draw(ix+PAD,iy2,SCALE_SM,0.52f,0.52f,0.55f,1,"NAME");
-    iy2+=text_line_height(SCALE_SM)+2;
-    bool fn=(ot->focus==OBJ_FOCUS_NAME);
-    draw_field_box(ix+PAD,iy2,INSP_W-PAD*2,FIELD_H,fn);
-    float th=text_line_height(SCALE_BODY);
-    textinput_render(&ot->fi_name,ix+PAD+4,iy2+(FIELD_H-th)*.5f,SCALE_BODY,1,1,1,1);
-    if(hittest(ix+PAD,iy2,INSP_W-PAD*2,FIELD_H,mx,my)&&
-       input_mouse_button_pressed(SDL_BUTTON_LEFT))
-        ((ObjectsTab*)ot)->focus=OBJ_FOCUS_NONE, set_focus((ObjectsTab*)ot,OBJ_FOCUS_NAME,0);
-    iy2+=FIELD_H+GAP*2;
+    ui_layout_label(&l, "NAME", true);
+    if (ui_layout_field(&l, &((ObjectsTab*)ot)->fi_name, 0, FIELD_H, ot->focus == OBJ_FOCUS_NAME, mx, my, NULL))
+        set_focus((ObjectsTab*)ot, OBJ_FOCUS_NAME, 0);
 
     /* Sprite */
-    text_draw(ix+PAD,iy2,SCALE_SM,0.52f,0.52f,0.55f,1,"SPRITE NAME");
-    iy2+=text_line_height(SCALE_SM)+2;
-    bool fs=(ot->focus==OBJ_FOCUS_SPRITE);
-    draw_field_box(ix+PAD,iy2,INSP_W-PAD*2,FIELD_H,fs);
-    textinput_render(&ot->fi_sprite,ix+PAD+4,iy2+(FIELD_H-th)*.5f,SCALE_BODY,0.85f,0.95f,0.70f,1);
-    if(hittest(ix+PAD,iy2,INSP_W-PAD*2,FIELD_H,mx,my)&&
-       input_mouse_button_pressed(SDL_BUTTON_LEFT))
-        set_focus((ObjectsTab*)ot,OBJ_FOCUS_SPRITE,0);
-    iy2+=FIELD_H+GAP*2;
+    ui_layout_label(&l, "SPRITE NAME", true);
+    if (ui_layout_field(&l, &((ObjectsTab*)ot)->fi_sprite, 0, FIELD_H, ot->focus == OBJ_FOCUS_SPRITE, mx, my, NULL))
+        set_focus((ObjectsTab*)ot, OBJ_FOCUS_SPRITE, 0);
 
     /* Properties header */
-    text_draw(ix+PAD,iy2,SCALE_SM,0.52f,0.52f,0.55f,1,"PROPERTIES");
-    iy2+=text_line_height(SCALE_SM)+2;
-    float half=(INSP_W-PAD*3)*.5f;
-    for(int i=0;i<ot->editing.prop_count&&iy2+FIELD_H<(float)vh-BTN_H*2-GAP*4;i++){
-        bool fnm=(ot->focus==OBJ_FOCUS_PROP_NAME&&ot->focus_idx==i);
-        bool fvl=(ot->focus==OBJ_FOCUS_PROP_VALUE&&ot->focus_idx==i);
-        draw_field_box(ix+PAD,iy2,half,FIELD_H,fnm);
-        textinput_render(&ot->fi_prop_name[i],ix+PAD+3,iy2+(FIELD_H-th)*.5f,SCALE_BODY,1,1,0.7f,1);
-        if(hittest(ix+PAD,iy2,half,FIELD_H,mx,my)&&input_mouse_button_pressed(SDL_BUTTON_LEFT))
-            set_focus((ObjectsTab*)ot,OBJ_FOCUS_PROP_NAME,i);
-        draw_field_box(ix+PAD*2+half,iy2,half,FIELD_H,fvl);
-        textinput_render(&ot->fi_prop_value[i],ix+PAD*2+half+3,iy2+(FIELD_H-th)*.5f,SCALE_BODY,1,1,1,1);
-        if(hittest(ix+PAD*2+half,iy2,half,FIELD_H,mx,my)&&input_mouse_button_pressed(SDL_BUTTON_LEFT))
-            set_focus((ObjectsTab*)ot,OBJ_FOCUS_PROP_VALUE,i);
-        /* type label */
+    ui_layout_label(&l, "PROPERTIES", true);
+    float half = (INSP_W - PAD * 3.0f) * 0.5f;
+    for(int i=0;i<ot->editing.prop_count&&l.cursor_y+FIELD_H<(float)vh-BTN_H*2-GAP*4;i++){
+        ui_layout_row_begin(&l);
+        if (ui_layout_field(&l, &((ObjectsTab*)ot)->fi_prop_name[i], half, FIELD_H, ot->focus == OBJ_FOCUS_PROP_NAME && ot->focus_idx == i, mx, my, NULL))
+            set_focus((ObjectsTab*)ot, OBJ_FOCUS_PROP_NAME, i);
+            
+        ui_layout_row_step_x(&l, half + PAD);
+        if (ui_layout_field(&l, &((ObjectsTab*)ot)->fi_prop_value[i], half, FIELD_H, ot->focus == OBJ_FOCUS_PROP_VALUE && ot->focus_idx == i, mx, my, NULL))
+            set_focus((ObjectsTab*)ot, OBJ_FOCUS_PROP_VALUE, i);
+        ui_layout_row_end(&l);
+        
         char tl[8]; snprintf(tl,sizeof tl,"%s",prop_type_name(ot->editing.props[i].type));
-        text_draw(ix+PAD,iy2+FIELD_H+1,1.1f,0.40f,0.40f,0.50f,1,tl);
-        iy2+=FIELD_H+GAP+text_line_height(1.1f)+2;
+        ui_layout_label(&l, tl, true);
     }
+    
     /* Add property button */
     if(ot->editing.prop_count<OBJDEF_MAX_PROPS){
-        if(draw_btn(ix+PAD,iy2,100,BTN_H,"+ PROP",false,mx,my)){
+        if (ui_layout_button(&l, "+ PROP", 100, BTN_H, false, mx, my)) {
             int n=((ObjectsTab*)ot)->editing.prop_count;
             ObjectProperty*p=&((ObjectsTab*)ot)->editing.props[n];
             strncpy(p->name,"new_prop",OBJDEF_NAME_MAX-1);
@@ -301,7 +275,32 @@ void objects_tab_render(const ObjectsTab*ot,int vw,int vh){
             textinput_set(&((ObjectsTab*)ot)->fi_prop_name[n],"new_prop");
             textinput_set(&((ObjectsTab*)ot)->fi_prop_value[n],"0");
         }
-        iy2+=BTN_H+GAP;
+    }
+    
+    /* Behaviors (Sprite Functions) */
+    ui_layout_gap(&l, 10.0f);
+    ui_layout_label(&l, "BEHAVIORS (FUNCTIONS)", true);
+    for(int i=0;i<ot->editing.behavior_count&&l.cursor_y+FIELD_H<(float)vh-BTN_H*2-GAP*4;i++){
+        ui_layout_row_begin(&l);
+        if (ui_layout_field(&l, &((ObjectsTab*)ot)->fi_behav_event[i], half, FIELD_H, ot->focus == OBJ_FOCUS_BEHAV_EVENT && ot->focus_idx == i, mx, my, NULL))
+            set_focus((ObjectsTab*)ot, OBJ_FOCUS_BEHAV_EVENT, i);
+            
+        ui_layout_row_step_x(&l, half + PAD);
+        if (ui_layout_field(&l, &((ObjectsTab*)ot)->fi_behav_script[i], half, FIELD_H, ot->focus == OBJ_FOCUS_BEHAV_SCRIPT && ot->focus_idx == i, mx, my, NULL))
+            set_focus((ObjectsTab*)ot, OBJ_FOCUS_BEHAV_SCRIPT, i);
+        ui_layout_row_end(&l);
+    }
+    
+    if (ot->editing.behavior_count < OBJDEF_MAX_BEHAV) {
+        if (ui_layout_button(&l, "+ BEHAVIOR", 120, BTN_H, false, mx, my)) {
+            int n=((ObjectsTab*)ot)->editing.behavior_count;
+            ObjectBehavior*b=&((ObjectsTab*)ot)->editing.behaviors[n];
+            strncpy(b->event,"on_interact",OBJDEF_NAME_MAX-1);
+            strncpy(b->script,"",OBJDEF_PATH_MAX-1);
+            ((ObjectsTab*)ot)->editing.behavior_count++;
+            textinput_set(&((ObjectsTab*)ot)->fi_behav_event[n],"on_interact");
+            textinput_set(&((ObjectsTab*)ot)->fi_behav_script[n],"");
+        }
     }
 
     /* Save / Delete */

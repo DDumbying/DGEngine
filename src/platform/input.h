@@ -48,6 +48,11 @@ bool input_quit_requested(void);
 void input_text_input_activate(void);
 void input_text_input_deactivate(void);
 
+/* Returns true if a text field currently has focus. If true, gameplay systems 
+   (like camera panning or editor shortcuts) should ignore keyboard input to 
+   prevent "input bleed". */
+bool input_keyboard_consumed(void);
+
 /* UTF-8 bytes typed this frame — usually a single ASCII character,
    occasionally more (fast typing can deliver more than one
    SDL_TEXTINPUT event per frame; an IME composition commit can also

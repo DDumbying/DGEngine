@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include "../ecs/registry.h"
 #include "../world/world.h"
+#include "../world/spatial_grid.h"
 #include "../renderer/camera.h"
 #include "../game/prefabs.h"
 #include "../simulation/simulation.h"
@@ -97,7 +98,8 @@ const char *terrain_name(TerrainType t);
    that strip) also paints/places/selects on whatever world tile
    happens to be behind it. */
 void editor_update(Editor *ed, Registry *reg, World *world, const Camera *cam,
-                    ResourceStore *resources, int ui_panel_width, int ui_top_margin);
+                    ResourceStore *resources, SpatialGrid *sgrid,
+                    int ui_panel_width, int ui_top_margin);
 
 /* Draws ground-level highlights only (hover + selection markers).
    Call between world_render() and system_render_entities() — that

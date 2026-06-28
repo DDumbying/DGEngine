@@ -121,6 +121,12 @@ void input_mouse_delta(int *dx, int *dy) {
 bool input_quit_requested(void) { return s_quit; }
 
 void input_text_input_activate(void)   { SDL_StartTextInput(); }
-void input_text_input_deactivate(void) { SDL_StopTextInput(); }
+void input_text_input_deactivate(void) {
+    SDL_StopTextInput();
+}
+
+bool input_keyboard_consumed(void) {
+    return SDL_IsTextInputActive() == SDL_TRUE;
+}
 
 const char *input_text_typed(void) { return s_text_typed; }

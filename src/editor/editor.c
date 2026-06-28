@@ -47,23 +47,7 @@ static bool pick_tile(const Camera *cam, World *world, int ui_panel_width, int u
     return true;
 }
 
-/* Linear scan over MAX_ENTITIES, only on click (not per-frame), same
-   "simple until it's actually slow" reasoning as everything else in
-   this engine. Revisit with a spatial grid if entity counts grow large
-   enough for this to matter — Simulation/AI phases are likelier to hit
-   that ceiling first, at which point picking can reuse whatever
-   structure they build. */
-static Entity find_entity_at_tile(Registry *reg, int gx, int gy) {
-    for (Entity e = 0; e < (Entity)MAX_ENTITIES; e++) {
-        if (!entity_alive(reg, e)) continue;
-        TransformComponent *t = entity_get_transform(reg, e);
-        if (!t) continue;
-        int ex = (int)floorf(t->x + 0.5f);
-        int ey = (int)floorf(t->y + 0.5f);
-        if (ex == gx && ey == gy) return e;
-    }
-    return ENTITY_NULL;
-}
+/* Phase 4: entity lookup is now O(1) via the spatial grid — see sgrid_at(). */
 
 static void log_entity_info(Registry *reg, Entity e) {
     TransformComponent  *t  = entity_get_transform(reg, e);
@@ -148,26 +132,30 @@ void editor_init(Editor *ed) {
 }
 
 void editor_update(Editor *ed, Registry *reg, World *world, const Camera *cam,
-                    ResourceStore *resources, int ui_panel_width, int ui_top_margin) {
+                    ResourceStore *resources, SpatialGrid *sgrid,
+                    int ui_panel_width, int ui_top_margin) {
     ed->hover_valid = pick_tile(cam, world, ui_panel_width, ui_top_margin, &ed->hover_gx, &ed->hover_gy);
-
-    if (input_key_pressed(SDL_SCANCODE_TAB)) {
-        ed->mode = (EditorMode)((ed->mode + 1) % EDITOR_MODE_COUNT);
-        LOG_INFO("Editor mode -> %s", editor_mode_name(ed->mode));
+    if (!input_keyboard_consumed()) {
+        if (input_key_pressed(SDL_SCANCODE_TAB)) {
+            ed->mode = (EditorMode)((ed->mode + 1) % EDITOR_MODE_COUNT);
+            LOG_INFO("Editor mode -> %s", editor_mode_name(ed->mode));
+        }
     }
 
     switch (ed->mode) {
 
     case EDITOR_MODE_PAINT: {
-        static const SDL_Scancode keys[] = {
-            SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3,
-            SDL_SCANCODE_4, SDL_SCANCODE_5
-        };
-        int num_keys = (int)(sizeof(keys) / sizeof(keys[0]));
-        for (int i = 0; i < num_keys && i < TERRAIN_COUNT; i++) {
-            if (input_key_pressed(keys[i])) {
-                ed->brush = (TerrainType)i;
-                LOG_INFO("Brush -> %s", terrain_name(ed->brush));
+        if (!input_keyboard_consumed()) {
+            static const SDL_Scancode keys[] = {
+                SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3,
+                SDL_SCANCODE_4, SDL_SCANCODE_5
+            };
+            int num_keys = (int)(sizeof(keys) / sizeof(keys[0]));
+            for (int i = 0; i < num_keys && i < TERRAIN_COUNT; i++) {
+                if (input_key_pressed(keys[i])) {
+                    ed->brush = (TerrainType)i;
+                    LOG_INFO("Brush -> %s", terrain_name(ed->brush));
+                }
             }
         }
         if (ed->hover_valid && input_mouse_button_down(SDL_BUTTON_LEFT)) {
@@ -177,27 +165,29 @@ void editor_update(Editor *ed, Registry *reg, World *world, const Camera *cam,
     }
 
     case EDITOR_MODE_PLACE: {
-        if (input_key_pressed(SDL_SCANCODE_1)) {
-            ed->prefab = PREFAB_TREE;
-            ed->placing_building = false;
-            LOG_INFO("Prefab -> %s", prefab_name(ed->prefab));
-        }
-        if (input_key_pressed(SDL_SCANCODE_2)) {
-            ed->prefab = PREFAB_ROCK;
-            ed->placing_building = false;
-            LOG_INFO("Prefab -> %s", prefab_name(ed->prefab));
-        }
-        if (input_key_pressed(SDL_SCANCODE_3)) {
-            ed->prefab = PREFAB_WORKER;
-            ed->placing_building = false;
-            LOG_INFO("Prefab -> %s", prefab_name(ed->prefab));
-        }
-        if (input_key_pressed(SDL_SCANCODE_4)) {
-            ed->building = BUILDING_CAMPFIRE;
-            ed->placing_building = true;
-            LOG_INFO("Blueprint -> %s (%d %s)", building_name(ed->building),
-                     building_cost_amount(ed->building),
-                     building_cost_kind(ed->building) == RESOURCE_WOOD ? "wood" : "stone");
+        if (!input_keyboard_consumed()) {
+            if (input_key_pressed(SDL_SCANCODE_1)) {
+                ed->prefab = PREFAB_TREE;
+                ed->placing_building = false;
+                LOG_INFO("Prefab -> %s", prefab_name(ed->prefab));
+            }
+            if (input_key_pressed(SDL_SCANCODE_2)) {
+                ed->prefab = PREFAB_ROCK;
+                ed->placing_building = false;
+                LOG_INFO("Prefab -> %s", prefab_name(ed->prefab));
+            }
+            if (input_key_pressed(SDL_SCANCODE_3)) {
+                ed->prefab = PREFAB_WORKER;
+                ed->placing_building = false;
+                LOG_INFO("Prefab -> %s", prefab_name(ed->prefab));
+            }
+            if (input_key_pressed(SDL_SCANCODE_4)) {
+                ed->building = BUILDING_CAMPFIRE;
+                ed->placing_building = true;
+                LOG_INFO("Blueprint -> %s (%d %s)", building_name(ed->building),
+                         building_cost_amount(ed->building),
+                         building_cost_kind(ed->building) == RESOURCE_WOOD ? "wood" : "stone");
+            }
         }
         if (ed->hover_valid && input_mouse_button_pressed(SDL_BUTTON_LEFT)) {
             const Tile *t = world_get_tile(world, ed->hover_gx, ed->hover_gy);
@@ -213,6 +203,7 @@ void editor_update(Editor *ed, Registry *reg, World *world, const Camera *cam,
                     Entity e = construction_place_blueprint(reg, ed->building,
                                                              (float)ed->hover_gx, (float)ed->hover_gy);
                     if (e != ENTITY_NULL) {
+                        sgrid_insert(sgrid, e, ed->hover_gx, ed->hover_gy);
                         LOG_INFO("Blueprint placed: %s at (%d, %d) — assign a worker "
                                  "(SELECT mode, M) to build it", building_name(ed->building),
                                  ed->hover_gx, ed->hover_gy);
@@ -250,6 +241,7 @@ void editor_update(Editor *ed, Registry *reg, World *world, const Camera *cam,
                                 reg, &def, ed->place_sprite_id,
                                 (float)ed->hover_gx, (float)ed->hover_gy);
                             if (e != ENTITY_NULL) {
+                                sgrid_insert(sgrid, e, ed->hover_gx, ed->hover_gy);
                                 LOG_INFO("Blueprint placed: '%s' at (%d, %d) — assign a worker "
                                          "(SELECT mode, M) to build it", def.name,
                                          ed->hover_gx, ed->hover_gy);
@@ -265,25 +257,27 @@ void editor_update(Editor *ed, Registry *reg, World *world, const Camera *cam,
                     } else {
                         Entity e = objdef_spawn_instance(reg, &def, ed->place_sprite_id,
                                                           (float)ed->hover_gx, (float)ed->hover_gy);
-                        if (e != ENTITY_NULL)
+                        if (e != ENTITY_NULL) {
+                            sgrid_insert(sgrid, e, ed->hover_gx, ed->hover_gy);
                             LOG_INFO("Placed '%s' at (%d, %d)", def.name,
                                      ed->hover_gx, ed->hover_gy);
-                        else
+                        } else
                             LOG_WARN("Could not place '%s' — registry full", def.name);
                     }
                 }
             } else {
                 Entity e = prefab_spawn(reg, ed->prefab,
                                          (float)ed->hover_gx, (float)ed->hover_gy);
-                if (e != ENTITY_NULL)
+                if (e != ENTITY_NULL) {
+                    sgrid_insert(sgrid, e, ed->hover_gx, ed->hover_gy);
                     LOG_INFO("Placed %s at (%d, %d)", prefab_name(ed->prefab),
                              ed->hover_gx, ed->hover_gy);
-                else
+                } else
                     LOG_WARN("Could not place %s — registry full", prefab_name(ed->prefab));
             }
         }
         if (ed->hover_valid && input_mouse_button_pressed(SDL_BUTTON_RIGHT)) {
-            Entity e = find_entity_at_tile(reg, ed->hover_gx, ed->hover_gy);
+            Entity e = sgrid_at(sgrid, ed->hover_gx, ed->hover_gy);
             if (e != ENTITY_NULL) {
                 /* Deleting an unfinished blueprint refunds its cost — a
                    misclick or change of mind shouldn't be an unrecoverable
@@ -305,6 +299,7 @@ void editor_update(Editor *ed, Registry *reg, World *world, const Camera *cam,
                    mode earlier, drop the (now-stale) handle too. */
                 if (ed->selected.index == e)
                     ed->selected = ENTITY_HANDLE_NULL;
+                sgrid_remove(sgrid, ed->hover_gx, ed->hover_gy);
                 entity_destroy(reg, e);
             }
         }
@@ -313,7 +308,7 @@ void editor_update(Editor *ed, Registry *reg, World *world, const Camera *cam,
 
     case EDITOR_MODE_SELECT: {
         if (ed->hover_valid && input_mouse_button_pressed(SDL_BUTTON_LEFT)) {
-            Entity e = find_entity_at_tile(reg, ed->hover_gx, ed->hover_gy);
+            Entity e = sgrid_at(sgrid, ed->hover_gx, ed->hover_gy);
             if (e != ENTITY_NULL) {
                 ed->selected = entity_to_handle(reg, e);
                 log_entity_info(reg, e);
@@ -323,61 +318,65 @@ void editor_update(Editor *ed, Registry *reg, World *world, const Camera *cam,
                 ed->selected = ENTITY_HANDLE_NULL;
             }
         }
-        if ((input_key_pressed(SDL_SCANCODE_DELETE) ||
-             input_key_pressed(SDL_SCANCODE_BACKSPACE)) &&
-            entity_handle_valid(reg, ed->selected)) {
-            Entity e = ed->selected.index;
-            entity_destroy(reg, e);
-            ed->selected = ENTITY_HANDLE_NULL;
-            LOG_INFO("Deleted selected entity %u", e);
-        }
-        if (input_key_pressed(SDL_SCANCODE_M) && entity_handle_valid(reg, ed->selected)) {
-            Entity worker = ed->selected.index;
-            if (reg->has_move[worker] && reg->has_task[worker]) {
-                if (ed->hover_valid) {
-                    Entity hover_ent = find_entity_at_tile(reg, ed->hover_gx, ed->hover_gy);
-                    if (hover_ent != ENTITY_NULL && reg->has_resource[hover_ent]) {
-                        TaskComponent *tsk = entity_get_task(reg, worker);
-                        tsk->kind = TASK_HARVEST;
-                        tsk->target_x = ed->hover_gx;
-                        tsk->target_y = ed->hover_gy;
-                        tsk->path.len = 0;
-                        tsk->path_step = 0;
-                        tsk->timer = 0.0f;
-                        const char *res_type = (reg->resource[hover_ent].kind == RESOURCE_WOOD) ? "wood" : "stone";
-                        LOG_INFO("Worker %u assigned to harvest %s at (%d, %d)",
-                                 worker, res_type, ed->hover_gx, ed->hover_gy);
-                    } else if (hover_ent != ENTITY_NULL && reg->has_construction[hover_ent]
-                               && !reg->construction[hover_ent].complete) {
-                        TaskComponent *tsk = entity_get_task(reg, worker);
-                        tsk->kind = TASK_BUILD;
-                        tsk->target_x = ed->hover_gx;
-                        tsk->target_y = ed->hover_gy;
-                        tsk->path.len = 0;
-                        tsk->path_step = 0;
-                        tsk->timer = 0.0f;
-                        LOG_INFO("Worker %u assigned to build %s at (%d, %d)",
-                                 worker, building_name(reg->construction[hover_ent].kind),
-                                 ed->hover_gx, ed->hover_gy);
-                    } else {
-                        const Tile *tile = world_get_tile(world, ed->hover_gx, ed->hover_gy);
-                        if (tile && tile_is_walkable(tile->type)) {
+        if (!input_keyboard_consumed()) {
+            if ((input_key_pressed(SDL_SCANCODE_DELETE) ||
+                 input_key_pressed(SDL_SCANCODE_BACKSPACE)) &&
+                entity_handle_valid(reg, ed->selected)) {
+                Entity e = ed->selected.index;
+                TransformComponent *t = entity_get_transform(reg, e);
+                if (t) sgrid_remove(sgrid, (int)(t->x + 0.5f), (int)(t->y + 0.5f));
+                entity_destroy(reg, e);
+                ed->selected = ENTITY_HANDLE_NULL;
+                LOG_INFO("Deleted selected entity %u", e);
+            }
+            if (input_key_pressed(SDL_SCANCODE_M) && entity_handle_valid(reg, ed->selected)) {
+                Entity worker = ed->selected.index;
+                if (reg->has_move[worker] && reg->has_task[worker]) {
+                    if (ed->hover_valid) {
+                        Entity hover_ent = sgrid_at(sgrid, ed->hover_gx, ed->hover_gy);
+                        if (hover_ent != ENTITY_NULL && reg->has_resource[hover_ent]) {
                             TaskComponent *tsk = entity_get_task(reg, worker);
-                            tsk->kind = TASK_MOVE_TO;
+                            tsk->kind = TASK_HARVEST;
                             tsk->target_x = ed->hover_gx;
                             tsk->target_y = ed->hover_gy;
                             tsk->path.len = 0;
                             tsk->path_step = 0;
-                            LOG_INFO("Worker %u assigned to move to (%d, %d)",
-                                     worker, ed->hover_gx, ed->hover_gy);
-                        } else {
-                            LOG_WARN("Cannot assign task: tile (%d, %d) is unwalkable",
+                            tsk->timer = 0.0f;
+                            const char *res_type = (reg->resource[hover_ent].kind == RESOURCE_WOOD) ? "wood" : "stone";
+                            LOG_INFO("Worker %u assigned to harvest %s at (%d, %d)",
+                                     worker, res_type, ed->hover_gx, ed->hover_gy);
+                        } else if (hover_ent != ENTITY_NULL && reg->has_construction[hover_ent]
+                                   && !reg->construction[hover_ent].complete) {
+                            TaskComponent *tsk = entity_get_task(reg, worker);
+                            tsk->kind = TASK_BUILD;
+                            tsk->target_x = ed->hover_gx;
+                            tsk->target_y = ed->hover_gy;
+                            tsk->path.len = 0;
+                            tsk->path_step = 0;
+                            tsk->timer = 0.0f;
+                            LOG_INFO("Worker %u assigned to build %s at (%d, %d)",
+                                     worker, building_name(reg->construction[hover_ent].kind),
                                      ed->hover_gx, ed->hover_gy);
+                        } else {
+                            const Tile *tile = world_get_tile(world, ed->hover_gx, ed->hover_gy);
+                            if (tile && tile_is_walkable(tile->type)) {
+                                TaskComponent *tsk = entity_get_task(reg, worker);
+                                tsk->kind = TASK_MOVE_TO;
+                                tsk->target_x = ed->hover_gx;
+                                tsk->target_y = ed->hover_gy;
+                                tsk->path.len = 0;
+                                tsk->path_step = 0;
+                                LOG_INFO("Worker %u assigned to move to (%d, %d)",
+                                         worker, ed->hover_gx, ed->hover_gy);
+                            } else {
+                                LOG_WARN("Cannot assign task: tile (%d, %d) is unwalkable",
+                                         ed->hover_gx, ed->hover_gy);
+                            }
                         }
                     }
+                } else {
+                    LOG_WARN("Selected entity %u is not an agent (cannot accept movement/tasks)", worker);
                 }
-            } else {
-                LOG_WARN("Selected entity %u is not an agent (cannot accept movement/tasks)", worker);
             }
         }
         break;

@@ -3,7 +3,7 @@
 
 #include "../simulation/simulation.h"
 
-/*  User-defined object types.
+/*  Phase L — User-defined object types.
 
     An ObjectDef is the *template* for a category of entity — the
     data-driven replacement for hardcoded C enums like PREFAB_TREE.

@@ -9,6 +9,7 @@
 #include "../core/log.h"
 #include "text.h"
 #include "tabbar.h"
+#include "layout.h"
 
 /* -----------------------------------------------------------------------
    Layout constants (all pixel values, relative to the content area) */
@@ -40,20 +41,6 @@ static void draw_box_border(float x, float y, float w, float h,
     renderer_draw_quad(x,       y+h-1,   w,    1.0f, br, bg, bb, 1.0f);
     renderer_draw_quad(x,       y,       1.0f, h,    br, bg, bb, 1.0f);
     renderer_draw_quad(x+w-1,   y,       1.0f, h,    br, bg, bb, 1.0f);
-}
-
-static bool draw_button(float x, float y, float w, float h,
-                         const char *label, int mx, int my) {
-    bool hover = hittest(x, y, w, h, mx, my);
-    bool click = hover && input_mouse_button_pressed(SDL_BUTTON_LEFT);
-    float bg = hover ? 0.22f : 0.14f;
-    renderer_draw_quad(x, y, w, h, bg, bg, bg + 0.03f, 1.0f);
-    draw_box_border(x, y, w, h, 0.30f, 0.30f, 0.36f);
-    float tw = text_measure_width(label, SCALE_BODY);
-    float th = text_line_height(SCALE_BODY);
-    text_draw(x + (w - tw) * 0.5f, y + (h - th) * 0.5f,
-              SCALE_BODY, 0.90f, 0.90f, 0.90f, 1.0f, label);
-    return click;
 }
 
 /* -----------------------------------------------------------------------
@@ -102,6 +89,10 @@ const char *sprites_tab_get_name(const SpritesTab *st, int id) {
 }
 
 int sprites_tab_find_id(const SpritesTab *st, const char *name) {
+    if (st->assets) {
+        int id = asset_library_find_id(st->assets, name);
+        if (id >= 0) return id;
+    }
     for (int i = 0; i < st->name_count; i++)
         if (strncmp(st->names[i].name, name, SPRITE_NAME_MAX) == 0)
             return st->names[i].id;
@@ -111,13 +102,17 @@ int sprites_tab_find_id(const SpritesTab *st, const char *name) {
 /* -----------------------------------------------------------------------
    Public API */
 
-void sprites_tab_init(SpritesTab *st, SpriteAtlas *atlas) {
+void sprites_tab_init(SpritesTab *st, SpriteAtlas *atlas, AssetLibrary *assets) {
     memset(st, 0, sizeof(*st));
     st->atlas       = atlas;
+    st->assets      = assets;
     st->selected_id = -1;
     textinput_init(&st->name_field,  SPRITE_NAME_MAX - 1, false);
     textinput_init(&st->load_path,   255, false);
     textinput_set (&st->load_path,   "assets/sprites.png");
+    textinput_init(&st->import_path, ASSET_PATH_MAX - 1, false);
+    textinput_set (&st->import_path, "assets/");
+    textinput_init(&st->import_name, ASSET_NAME_MAX - 1, false);
     sprites_tab_load_meta(st);
 }
 
@@ -172,95 +167,9 @@ void sprites_tab_update(SpritesTab *st, int vw, int vh) {
     cell_clicked:;
 
     /* Inspector interaction */
-    float insp_x = (float)vw - INSPECTOR_W;
-    float iy = grid_y;
-
-    if (st->selected_id >= 0) {
-        /* Name field */
-        float field_y = iy + text_line_height(SCALE_LBL) + 4.0f + text_line_height(SCALE_SMALL) + 4.0f;
-        float field_w = INSPECTOR_W - PAD * 2.0f;
-        bool field_hover = hittest(insp_x + PAD, field_y, field_w, 24.0f, mx, my);
-
-        if (field_hover && input_mouse_button_pressed(SDL_BUTTON_LEFT)) {
-            if (!st->name_focused) {
-                st->name_focused = true;
-                textinput_focus(&st->name_field);
-            }
-        } else if (!field_hover && input_mouse_button_pressed(SDL_BUTTON_LEFT)) {
-            if (st->name_focused) {
-                textinput_unfocus(&st->name_field);
-                st->name_focused = false;
-            }
-        }
-
-        if (st->name_focused) {
-            bool enter = textinput_update(&st->name_field, insp_x + PAD + 4.0f,
-                                          field_y + 4.0f, field_w - 8.0f, SCALE_BODY);
-            if (enter) {
-                /* Commit the name */
-                const char *new_name = textinput_get(&st->name_field);
-                int slot = find_name_slot(st, st->selected_id);
-                if (new_name[0]) {
-                    if (slot < 0 && st->name_count < SPRITES_META_MAX) {
-                        slot = st->name_count++;
-                        st->names[slot].id = st->selected_id;
-                    }
-                    if (slot >= 0)
-                        strncpy(st->names[slot].name, new_name, SPRITE_NAME_MAX - 1);
-                } else {
-                    /* Empty name → remove the entry */
-                    if (slot >= 0) {
-                        st->names[slot] = st->names[--st->name_count];
-                    }
-                }
-                sprites_tab_save_meta(st);
-                textinput_unfocus(&st->name_field);
-                st->name_focused = false;
-                snprintf(st->status, sizeof st->status, "SAVED.");
-            }
-        }
-
-        /* Save button */
-        float btn_y = field_y + 28.0f + 8.0f;
-        if (draw_button(insp_x + PAD, btn_y, 80.0f, BTN_H, "SAVE", mx, my)) {
-            const char *new_name = textinput_get(&st->name_field);
-            int slot = find_name_slot(st, st->selected_id);
-            if (new_name[0]) {
-                if (slot < 0 && st->name_count < SPRITES_META_MAX) {
-                    slot = st->name_count++;
-                    st->names[slot].id = st->selected_id;
-                }
-                if (slot >= 0)
-                    strncpy(st->names[slot].name, new_name, SPRITE_NAME_MAX - 1);
-            } else if (slot >= 0) {
-                st->names[slot] = st->names[--st->name_count];
-            }
-            sprites_tab_save_meta(st);
-            snprintf(st->status, sizeof st->status, "SAVED.");
-        }
-    }
-
-    /* Load path field — at the bottom of the inspector */
-    float load_y = (float)vh - PAD - BTN_H - 8.0f - 24.0f - PAD;
-    bool lp_hover = hittest(insp_x + PAD, load_y, INSPECTOR_W - PAD * 2.0f, 24.0f, mx, my);
-    if (lp_hover && input_mouse_button_pressed(SDL_BUTTON_LEFT)) {
-        if (!st->load_path_focused) {
-            if (st->name_focused) { textinput_unfocus(&st->name_field); st->name_focused = false; }
-            st->load_path_focused = true;
-            textinput_focus(&st->load_path);
-        }
-    } else if (!lp_hover && input_mouse_button_pressed(SDL_BUTTON_LEFT)) {
-        if (st->load_path_focused) {
-            textinput_unfocus(&st->load_path);
-            st->load_path_focused = false;
-        }
-    }
-    if (st->load_path_focused)
-        textinput_update(&st->load_path, insp_x + PAD + 4.0f, load_y + 4.0f,
-                          INSPECTOR_W - PAD * 2.0f - 8.0f, SCALE_BODY);
-
-    float reload_y = (float)vh - PAD - BTN_H;
-    (void)reload_y;
+        /* UI handled in render */
+    /* Import interaction handled in render */
+    /* Load interaction handled in render */
     (void)vh;
 }
 
@@ -351,48 +260,63 @@ void sprites_tab_render(const SpritesTab *st, int vw, int vh) {
     renderer_draw_quad(insp_x, CONTENT_Y, INSPECTOR_W, (float)vh - CONTENT_Y,
                        0.09f, 0.09f, 0.11f, 1.0f);
 
-    float iy = CONTENT_Y + PAD;
+    UILayout l;
+    ui_layout_begin(&l, insp_x + PAD, CONTENT_Y + PAD, INSPECTOR_W - PAD * 2.0f);
 
     if (st->selected_id < 0) {
-        text_draw(insp_x + PAD, iy, SCALE_BODY, 0.40f, 0.40f, 0.45f, 1.0f,
-                  "SELECT A CELL");
+        ui_layout_label(&l, "SELECT A CELL", false);
     } else {
         /* Selected cell info */
         char info[64];
         snprintf(info, sizeof info, "CELL %d", st->selected_id);
-        text_draw(insp_x + PAD, iy, SCALE_LBL, 0.85f, 0.85f, 0.90f, 1.0f, info);
-        iy += text_line_height(SCALE_LBL) + 4.0f;
+        ui_layout_label(&l, info, false);
 
         char dim[64];
         snprintf(dim, sizeof dim, "%dx%d PX", st->atlas->cell_w, st->atlas->cell_h);
-        text_draw(insp_x + PAD, iy, SCALE_SMALL, 0.50f, 0.50f, 0.55f, 1.0f, dim);
-        iy += text_line_height(SCALE_SMALL) + 4.0f;
+        ui_layout_label(&l, dim, true);
+        ui_layout_gap(&l, 10.0f);
 
         /* Name field */
-        text_draw(insp_x + PAD, iy, SCALE_SMALL, 0.52f, 0.52f, 0.55f, 1.0f, "NAME");
-        iy += text_line_height(SCALE_SMALL) + 2.0f;
+        ui_layout_label(&l, "NAME", true);
+        
+        bool enter_pressed = false;
+        if (ui_layout_field(&l, &((SpritesTab*)st)->name_field, 0, 24.0f, st->name_focused, mx, my, &enter_pressed)) {
+            if (!st->name_focused) {
+                ((SpritesTab*)st)->name_focused = true;
+                textinput_focus(&((SpritesTab*)st)->name_field);
+                if (st->import_path_focused) { textinput_unfocus(&((SpritesTab*)st)->import_path); ((SpritesTab*)st)->import_path_focused = false; }
+                if (st->import_name_focused) { textinput_unfocus(&((SpritesTab*)st)->import_name); ((SpritesTab*)st)->import_name_focused = false; }
+                if (st->load_path_focused)   { textinput_unfocus(&((SpritesTab*)st)->load_path);   ((SpritesTab*)st)->load_path_focused = false; }
+            }
+        } else if (input_mouse_button_pressed(SDL_BUTTON_LEFT) && !hittest(insp_x + PAD, l.cursor_y - 28.0f, INSPECTOR_W, 28.0f, mx, my)) {
+            // Unfocus logic is handled implicitly or on click elsewhere
+        }
 
-        float field_w = INSPECTOR_W - PAD * 2.0f;
-        float fbg = st->name_focused ? 0.17f : 0.11f;
-        renderer_draw_quad(insp_x + PAD, iy, field_w, 24.0f,
-                           fbg, fbg, fbg, 1.0f);
-        draw_box_border(insp_x + PAD, iy, field_w, 24.0f,
-                        st->name_focused ? 0.30f : 0.22f,
-                        st->name_focused ? 0.75f : 0.30f,
-                        st->name_focused ? 0.45f : 0.22f);
-        float th = text_line_height(SCALE_BODY);
-        textinput_render(&st->name_field,
-                          insp_x + PAD + 4.0f, iy + (24.0f - th) * 0.5f,
-                          SCALE_BODY, 1.0f, 1.0f, 1.0f, 1.0f);
-        iy += 28.0f;
-
-        /* Hint */
-        text_draw(insp_x + PAD, iy + 2.0f, 1.1f, 0.35f, 0.35f, 0.40f, 1.0f,
-                  "CLICK FIELD, TYPE, ENTER");
-        iy += text_line_height(1.1f) + 4.0f;
+        ui_layout_gap(&l, 4.0f);
+        ui_layout_label(&l, "CLICK FIELD, TYPE, ENTER", true);
+        ui_layout_gap(&l, 4.0f);
 
         /* Save button */
-        draw_button(insp_x + PAD, iy, 80.0f, BTN_H, "SAVE", mx, my);
+        if (ui_layout_button(&l, "SAVE", 80.0f, BTN_H, false, mx, my) || enter_pressed) {
+            const char *new_name = textinput_get(&st->name_field);
+            int slot = find_name_slot((SpritesTab*)st, st->selected_id);
+            if (new_name[0]) {
+                if (slot < 0 && st->name_count < SPRITES_META_MAX) {
+                    slot = ((SpritesTab*)st)->name_count++;
+                    ((SpritesTab*)st)->names[slot].id = st->selected_id;
+                }
+                if (slot >= 0)
+                    strncpy(((SpritesTab*)st)->names[slot].name, new_name, SPRITE_NAME_MAX - 1);
+            } else if (slot >= 0) {
+                ((SpritesTab*)st)->names[slot] = st->names[--((SpritesTab*)st)->name_count];
+            }
+            sprites_tab_save_meta(st);
+            if (enter_pressed) {
+                textinput_unfocus(&((SpritesTab*)st)->name_field);
+                ((SpritesTab*)st)->name_focused = false;
+            }
+            snprintf(((SpritesTab*)st)->status, sizeof st->status, "SAVED.");
+        }
     }
 
     /* Status message */
@@ -403,25 +327,63 @@ void sprites_tab_render(const SpritesTab *st, int vw, int vh) {
                   SCALE_SMALL, 0.30f, 0.85f, 0.48f, 1.0f, st->status);
     }
 
-    /* Load atlas section at bottom of inspector */
-    float load_bottom_y = (float)vh - PAD - BTN_H;
-    float load_label_y  = load_bottom_y - 24.0f - 4.0f - text_line_height(SCALE_SMALL) - 4.0f;
-    text_draw(insp_x + PAD, load_label_y, SCALE_SMALL,
-              0.52f, 0.52f, 0.55f, 1.0f, "ATLAS PATH");
-    float load_field_y = load_label_y + text_line_height(SCALE_SMALL) + 4.0f;
-    float field_w = INSPECTOR_W - PAD * 2.0f;
-    float fbg2 = st->load_path_focused ? 0.17f : 0.11f;
-    renderer_draw_quad(insp_x + PAD, load_field_y, field_w, 24.0f,
-                       fbg2, fbg2, fbg2, 1.0f);
-    draw_box_border(insp_x + PAD, load_field_y, field_w, 24.0f,
-                    st->load_path_focused ? 0.30f : 0.22f,
-                    st->load_path_focused ? 0.75f : 0.30f,
-                    st->load_path_focused ? 0.45f : 0.22f);
-    float th2 = text_line_height(SCALE_BODY);
-    textinput_render(&st->load_path,
-                      insp_x + PAD + 4.0f, load_field_y + (24.0f - th2) * 0.5f,
-                      SCALE_BODY, 1.0f, 1.0f, 1.0f, 1.0f);
+    ui_layout_gap(&l, 20.0f);
+    ui_layout_label(&l, "IMPORT IMAGE (ANY SIZE, ANY PNG)", true);
 
-    draw_button(insp_x + PAD, load_bottom_y,
-                INSPECTOR_W - PAD * 2.0f, BTN_H, "RELOAD ATLAS", mx, my);
+    ui_layout_label(&l, "IMAGE PATH", true);
+    if (ui_layout_field(&l, &((SpritesTab*)st)->import_path, 0, 24.0f, st->import_path_focused, mx, my, NULL)) {
+        if (!st->import_path_focused) {
+            ((SpritesTab*)st)->import_path_focused = true;
+            textinput_focus(&((SpritesTab*)st)->import_path);
+            if (st->name_focused)        { textinput_unfocus(&((SpritesTab*)st)->name_field);  ((SpritesTab*)st)->name_focused = false; }
+            if (st->import_name_focused) { textinput_unfocus(&((SpritesTab*)st)->import_name); ((SpritesTab*)st)->import_name_focused = false; }
+            if (st->load_path_focused)   { textinput_unfocus(&((SpritesTab*)st)->load_path);   ((SpritesTab*)st)->load_path_focused = false; }
+        }
+    }
+    
+    ui_layout_label(&l, "SPRITE NAME", true);
+    if (ui_layout_field(&l, &((SpritesTab*)st)->import_name, 0, 24.0f, st->import_name_focused, mx, my, NULL)) {
+        if (!st->import_name_focused) {
+            ((SpritesTab*)st)->import_name_focused = true;
+            textinput_focus(&((SpritesTab*)st)->import_name);
+            if (st->name_focused)        { textinput_unfocus(&((SpritesTab*)st)->name_field);  ((SpritesTab*)st)->name_focused = false; }
+            if (st->import_path_focused) { textinput_unfocus(&((SpritesTab*)st)->import_path); ((SpritesTab*)st)->import_path_focused = false; }
+            if (st->load_path_focused)   { textinput_unfocus(&((SpritesTab*)st)->load_path);   ((SpritesTab*)st)->load_path_focused = false; }
+        }
+    }
+
+    if (ui_layout_button(&l, "IMPORT", 0, BTN_H, false, mx, my)) {
+        const char *path = textinput_get(&st->import_path);
+        const char *name = textinput_get(&st->import_name);
+        if (!name[0]) {
+            snprintf(((SpritesTab*)st)->status, sizeof st->status, "NAME REQUIRED.");
+        } else if (st->assets && asset_library_import(st->assets, path, name) >= 0) {
+            asset_library_save_meta(st->assets);
+            snprintf(((SpritesTab*)st)->status, sizeof st->status, "IMPORTED '%s'.", name);
+        } else {
+            snprintf(((SpritesTab*)st)->status, sizeof st->status, "IMPORT FAILED -- CHECK PATH.");
+        }
+    }
+
+    if (st->assets && st->assets->count > 0) {
+        char buf[48];
+        snprintf(buf, sizeof buf, "%d IMAGE(S) IMPORTED", st->assets->count);
+        ui_layout_label(&l, buf, true);
+    }
+
+    ui_layout_gap(&l, 20.0f);
+    ui_layout_label(&l, "ATLAS PATH", true);
+    if (ui_layout_field(&l, &((SpritesTab*)st)->load_path, 0, 24.0f, st->load_path_focused, mx, my, NULL)) {
+        if (!st->load_path_focused) {
+            ((SpritesTab*)st)->load_path_focused = true;
+            textinput_focus(&((SpritesTab*)st)->load_path);
+            if (st->name_focused)        { textinput_unfocus(&((SpritesTab*)st)->name_field);  ((SpritesTab*)st)->name_focused = false; }
+            if (st->import_name_focused) { textinput_unfocus(&((SpritesTab*)st)->import_name); ((SpritesTab*)st)->import_name_focused = false; }
+            if (st->import_path_focused) { textinput_unfocus(&((SpritesTab*)st)->import_path); ((SpritesTab*)st)->import_path_focused = false; }
+        }
+    }
+
+    if (ui_layout_button(&l, "RELOAD ATLAS", 0, BTN_H, false, mx, my)) {
+        // Handled in main loop or panel
+    }
 }

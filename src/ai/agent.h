@@ -3,9 +3,10 @@
 
 #include "../ecs/registry.h"
 #include "../world/world.h"
+#include "../world/spatial_grid.h"
 #include "../simulation/simulation.h"
 
-/*  Agent System
+/*  Phase 6 — Agent System
     Updates all agents in the registry.
     Agents are entities with:
       - TransformComponent (position)
@@ -19,6 +20,7 @@
         task has an empty path but has a target (e.g. after a file load).
 */
 
-void system_update_agents(Registry *reg, const World *world, ResourceStore *resources, float gdt, float speed_multiplier);
+void system_update_agents(Registry *reg, const World *world, SpatialGrid *sgrid,
+                          ResourceStore *resources, float gdt, float speed_multiplier);
 
 #endif /* DGE_AGENT_H */

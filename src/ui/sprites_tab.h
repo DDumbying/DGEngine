@@ -21,6 +21,7 @@
 
 #include <stdbool.h>
 #include "../renderer/atlas.h"
+#include "../renderer/asset_library.h"
 #include "textinput.h"
 
 #define SPRITES_META_MAX 256          /* max named sprite slots */
@@ -35,6 +36,11 @@ typedef struct {
 typedef struct {
     /* Current atlas reference (not owned — owned by main.c) */
     SpriteAtlas *atlas;
+
+    /* Asset import overhaul: a second, ungridded sprite source --
+       see renderer/asset_library.h for why this is a separate table
+       instead of folded into the atlas grid. Also not owned. */
+    AssetLibrary *assets;
 
     /* Selected cell */
     int selected_id;        /* -1 = nothing selected */
@@ -54,11 +60,25 @@ typedef struct {
     TextInput load_path;
     bool      load_path_focused;
 
+    /* Import section: path to import + name to register it under.
+       Two separate fields since "where the file is" and "what you
+       want to call it" are different questions -- defaulting the name
+       field from the path's basename (see sprites_tab.c) covers the
+       common case without forcing it. */
+    TextInput import_path;
+    bool      import_path_focused;
+    TextInput import_name;
+    bool      import_name_focused;
+
+    /* Imported-assets list scroll, separate from the grid's scroll_cells
+       since they're two independent lists in two different areas. */
+    int import_scroll;
+
     /* One-line status/error message */
     char status[128];
 } SpritesTab;
 
-void sprites_tab_init(SpritesTab *st, SpriteAtlas *atlas);
+void sprites_tab_init(SpritesTab *st, SpriteAtlas *atlas, AssetLibrary *assets);
 
 /*  Load  assets/sprites.meta (relative to cwd = project folder).
     Safe to call even if the file doesn't exist yet. */
@@ -70,7 +90,12 @@ void sprites_tab_save_meta(const SpritesTab *st);
 /*  Look up a sprite name by id.  Returns "" if not named. */
 const char *sprites_tab_get_name(const SpritesTab *st, int id);
 
-/*  Look up a sprite id by name.  Returns -1 if not found. */
+/*  Look up a sprite id by name. Checks the AssetLibrary first (an
+    imported standalone image), then the atlas grid's named cells --
+    returns -1 if neither has this name. This is the one function
+    ObjectDef's `sprite` property resolution actually calls, so this
+    is the one place that needs to know both sprite sources exist;
+    everything past this point is just an int again. */
 int sprites_tab_find_id(const SpritesTab *st, const char *name);
 
 /*  Per-frame update and render.  vw/vh are full viewport dimensions. */

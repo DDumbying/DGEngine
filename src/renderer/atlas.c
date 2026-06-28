@@ -68,8 +68,8 @@ static void compute_uv_grid(SpriteAtlas *a, int tex_w, int tex_h) {
     for (int i = 0; i < a->sprite_count; i++) {
         int col = i % a->cols;
         int row = i / a->cols;
-        float u0 = (float)(col * a->cell_w)           / (float)tex_w;
-        float v0 = (float)(row * a->cell_h)           / (float)tex_h;
+        float u0 = (float)(col * a->cell_w)             / (float)tex_w;
+        float v0 = (float)(row * a->cell_h)             / (float)tex_h;
         float u1 = (float)(col * a->cell_w + a->cell_w) / (float)tex_w;
         float v1 = (float)(row * a->cell_h + a->cell_h) / (float)tex_h;
         a->sprites[i] = (UVRect){ u0, v0, u1, v1 };

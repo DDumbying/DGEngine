@@ -216,6 +216,31 @@ void renderer_draw_quad(float x, float y, float w, float h,
     s_quad_count++;
 }
 
+void renderer_bind_texture(unsigned int tex_id) {
+    flush(); /* push any pending color-only quads first */
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex_id);
+    shader_set_float(&s_shader, "u_use_texture", 1.0f);
+}
+
+void renderer_draw_quad_uv(float x, float y, float w, float h,
+                           float r, float g, float b, float a,
+                           float u0, float v0, float u1, float v1) {
+    if (s_quad_count >= MAX_QUADS) flush();
+    float *v = s_verts + s_quad_count * VERTS_PER_QUAD * FLOATS_PER_VERT;
+    v[ 0]=x;   v[ 1]=y;   v[ 2]=r; v[ 3]=g; v[ 4]=b; v[ 5]=a; v[ 6]=u0; v[ 7]=v0;
+    v[ 8]=x+w; v[ 9]=y;   v[10]=r; v[11]=g; v[12]=b; v[13]=a; v[14]=u1; v[15]=v0;
+    v[16]=x+w; v[17]=y+h; v[18]=r; v[19]=g; v[20]=b; v[21]=a; v[22]=u1; v[23]=v1;
+    v[24]=x;   v[25]=y+h; v[26]=r; v[27]=g; v[28]=b; v[29]=a; v[30]=u0; v[31]=v1;
+    s_quad_count++;
+}
+
+void renderer_flush_texture(void) {
+    flush();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    shader_set_float(&s_shader, "u_use_texture", 0.0f);
+}
+
 void renderer_set_tile_size(float tw, float th) {
     s_tile_w = tw;
     s_tile_h = th;

@@ -2,17 +2,25 @@
 
 #include <string.h>
 #include "font.h"
+#include "font_atlas.h"
 #include "../renderer/renderer.h"
 
-/* One extra column of spacing after each glyph cell so letters don't
-   visually run together. */
+/* One extra column of spacing after each bitmap glyph cell so letters
+   don't visually run together (legacy path only). */
 #define GLYPH_ADVANCE_CELLS (FONT_GLYPH_W + 1)
+
+/* ---- Atlas path ---- */
 
 void text_draw(float x, float y, float scale,
                float r, float g, float b, float a,
                const char *str) {
-    float cursor_x = x;
+    if (font_atlas_ready()) {
+        font_atlas_draw(x, y, scale, r, g, b, a, str);
+        return;
+    }
 
+    /* ---- Legacy pixel-bitmap path ---- */
+    float cursor_x = x;
     for (const char *p = str; *p; p++) {
         const char *const *rows = font_get_glyph(*p);
         if (rows) {
@@ -33,9 +41,13 @@ void text_draw(float x, float y, float scale,
 }
 
 float text_measure_width(const char *str, float scale) {
+    if (font_atlas_ready())
+        return font_atlas_measure_width(str, scale);
     return (float)strlen(str) * (float)GLYPH_ADVANCE_CELLS * scale;
 }
 
 float text_line_height(float scale) {
+    if (font_atlas_ready())
+        return font_atlas_line_height(scale);
     return (float)FONT_GLYPH_H * scale;
 }

@@ -29,6 +29,16 @@ void renderer_begin_ui(int viewport_w, int viewport_h);
 void renderer_draw_quad(float x, float y, float w, float h,
                         float r, float g, float b, float a);
 
+/* Draw a UV-textured quad — batched, no flush. Caller must bind the
+   texture with renderer_bind_texture() before batching glyphs and
+   call renderer_flush_texture() after the last glyph in that batch.
+   uv0/uv1 are the top-left / bottom-right UV coordinates [0..1].     */
+void renderer_bind_texture(unsigned int tex_id);
+void renderer_draw_quad_uv(float x, float y, float w, float h,
+                           float r, float g, float b, float a,
+                           float u0, float v0, float u1, float v1);
+void renderer_flush_texture(void);
+
 /*  Isometric helpers.
     Tile size is set at init time via renderer_set_tile_size().
     Grid coords (gx, gy) → screen coords via standard 2:1 iso projection. */

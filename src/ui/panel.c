@@ -171,7 +171,7 @@ bool panel_update(Panel *p, Editor *ed, ResourceStore *resources,
     /* Keyboard toggle — works regardless of mouse position, so the
        panel can be brought back even if it was hidden mid-pan with the
        cursor somewhere over the world. */
-    if (input_key_pressed(SDL_SCANCODE_GRAVE)) {
+    if (!input_keyboard_consumed() && input_key_pressed(SDL_SCANCODE_GRAVE)) {
         p->visible = !p->visible;
         LOG_INFO("Sidebar panel -> %s (` key)", p->visible ? "shown" : "hidden");
     }
@@ -263,8 +263,12 @@ bool panel_update(Panel *p, Editor *ed, ResourceStore *resources,
             }
             y += btn_h + gap;
         }
+        if (obj_registry->count == 0)
+            y += 18; /* matches the hint-text line drawn in panel_render */
     } else {
-        /* SELECT — informational only, no buttons yet; see render(). */
+        /* SELECT — informational only; advance y to match render(). */
+        y += 20; /* "Selected: #N" / "Nothing selected" label */
+        /* hint line drawn in render but no y advance after it */
     }
     y += 18;
 
@@ -272,6 +276,7 @@ bool panel_update(Panel *p, Editor *ed, ResourceStore *resources,
     Rect new_r   = { margin, y, btn_w, btn_h };          y += btn_h + gap;
     Rect regen_r = { margin, y, btn_w, btn_h };          y += btn_h + gap;
     y += 10;
+    y += 16; /* "Canvas size" label in render */
 
     /* Canvas size row: [-] [  64  ] [+] for width, same for height,
        then an Apply button that actually resizes the World. Splitting
@@ -302,6 +307,7 @@ bool panel_update(Panel *p, Editor *ed, ResourceStore *resources,
 
     /* Weather section */
     y += 10;
+    y += 16; /* "WEATHER" label in render */
     /* Toggle auto-cycle button */
     Rect wx_toggle = { margin, y, btn_w, btn_h }; y += btn_h + gap;
     /* Weather type buttons: NONE / SUNNY / RAIN / SNOW */

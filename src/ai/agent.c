@@ -6,19 +6,8 @@
 #include <stdlib.h>
 #include <math.h>
 
-static Entity find_entity_at_tile(const Registry *reg, int gx, int gy) {
-    for (Entity e = 0; e < (Entity)MAX_ENTITIES; e++) {
-        if (!reg->alive[e]) continue;
-        if (!reg->has_transform[e]) continue;
-        const TransformComponent *t = &reg->transform[e];
-        int ex = (int)floorf(t->x + 0.5f);
-        int ey = (int)floorf(t->y + 0.5f);
-        if (ex == gx && ey == gy) return e;
-    }
-    return ENTITY_NULL;
-}
-
-void system_update_agents(Registry *reg, const World *world, ResourceStore *resources, float gdt, float speed_multiplier) {
+void system_update_agents(Registry *reg, const World *world, SpatialGrid *sgrid,
+                          ResourceStore *resources, float gdt, float speed_multiplier) {
     for (Entity e = 0; e < (Entity)MAX_ENTITIES; e++) {
         if (!reg->alive[e] || !reg->has_transform[e] || !reg->has_move[e] || !reg->has_task[e])
             continue;
@@ -37,6 +26,7 @@ void system_update_agents(Registry *reg, const World *world, ResourceStore *reso
             if (m->moving) {
                 m->progress += m->speed * speed_multiplier * gdt;
                 if (m->progress >= 1.0f) {
+                    sgrid_move(sgrid, e, m->src_x, m->src_y, m->dst_x, m->dst_y);
                     t->x = (float)m->dst_x;
                     t->y = (float)m->dst_y;
                     m->progress = 0.0f;
@@ -61,11 +51,13 @@ void system_update_agents(Registry *reg, const World *world, ResourceStore *reso
             tsk->timer += gdt;
             if (tsk->timer >= 1.0f) {
                 tsk->timer -= 1.0f;
-                Entity res_entity = find_entity_at_tile(reg, tsk->target_x, tsk->target_y);
+                /* Phase 4: O(1) lookup via spatial grid */
+                Entity res_entity = sgrid_at(sgrid, tsk->target_x, tsk->target_y);
                 if (res_entity != ENTITY_NULL && reg->has_resource[res_entity]) {
                     EntityHandle res_h = entity_to_handle(reg, res_entity);
                     bool destroyed = system_harvest_entity(reg, res_h, resources);
                     if (destroyed) {
+                        sgrid_remove(sgrid, tsk->target_x, tsk->target_y);
                         tsk->kind = TASK_IDLE;
                     }
                 } else {
@@ -81,13 +73,11 @@ void system_update_agents(Registry *reg, const World *world, ResourceStore *reso
            building is continuous labor, so every frame spent adjacent
            contributes gdt directly via system_build_entity(). */
         if (tsk->kind == TASK_BUILD && abs(cx - tsk->target_x) <= 1 && abs(cy - tsk->target_y) <= 1 && !m->moving) {
-            Entity blueprint = find_entity_at_tile(reg, tsk->target_x, tsk->target_y);
+            /* Phase 4: O(1) lookup via spatial grid */
+            Entity blueprint = sgrid_at(sgrid, tsk->target_x, tsk->target_y);
             if (blueprint != ENTITY_NULL && reg->has_construction[blueprint]
                 && !reg->construction[blueprint].complete) {
                 if (system_build_entity(reg, blueprint, gdt)) {
-                    /* system_build_entity() already logged completion —
-                       no second log here, same as HARVEST's silent
-                       transition above when destroyed comes back true. */
                     tsk->kind = TASK_IDLE;
                 }
             } else {
@@ -103,7 +93,6 @@ void system_update_agents(Registry *reg, const World *world, ResourceStore *reso
                           (tsk->path.y[tsk->path.len - 1] == tsk->target_y);
 
         if (!path_valid && !m->moving) {
-            /* Try to compute path */
             if (pathfinder_find(world, cx, cy, tsk->target_x, tsk->target_y, &tsk->path)) {
                 tsk->path_step = 0;
             } else {
@@ -117,6 +106,8 @@ void system_update_agents(Registry *reg, const World *world, ResourceStore *reso
         if (m->moving) {
             m->progress += m->speed * speed_multiplier * gdt;
             if (m->progress >= 1.0f) {
+                /* Phase 4: commit the hop in the spatial grid */
+                sgrid_move(sgrid, e, m->src_x, m->src_y, m->dst_x, m->dst_y);
                 t->x = (float)m->dst_x;
                 t->y = (float)m->dst_y;
                 m->progress = 0.0f;
@@ -143,7 +134,7 @@ void system_update_agents(Registry *reg, const World *world, ResourceStore *reso
                 m->progress = 0.0f;
                 tsk->path_step++;
             } else {
-                /* Path blocked! Force recalculation next frame. */
+                /* Path blocked — force recalculation next frame */
                 tsk->path.len = 0;
             }
         }

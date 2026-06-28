@@ -7,7 +7,7 @@
 
 bool texture_load(Texture *t, const char *path) {
     memset(t, 0, sizeof(*t));
-    stbi_set_flip_vertically_on_load(0);   /* y-down matches our screen space */
+    stbi_set_flip_vertically_on_load(1);   /* flip so GL v=0=bottom, v=1=top */
 
     int w, h, channels;
     unsigned char *data = stbi_load(path, &w, &h, &channels, 4);
