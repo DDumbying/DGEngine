@@ -1,18 +1,14 @@
-# DGEngine
+# DGEngine - Dumb Game Engine
 
-> **DGEngine (Dumbest Game Engine)** — an isometric simulation engine built from scratch in C using SDL2 and OpenGL.
+An isometric simulation engine built from scratch in C using SDL2 and OpenGL.
 
 Built because understanding a thing properly means building it yourself.
-This is not competing with Unity or Unreal. It is a focused tool for one specific genre: strategy, management, sandbox, and world-simulation games (think RimWorld, Factorio, Banished).
+
+> This is not competing with Unity or Unreal. It is a focused tool for one specific genre: strategy, management, sandbox, and world-simulation games (think RimWorld, Factorio, Banished).
 
 ## Philosophy
 
-> Understand everything. Abstract only when necessary.
-
-Every system is written to be readable. No magic. No hidden layers.
-If something breaks, you should be able to trace it to a single function.
-
-> i actually want to build something cool, even if most reasources keep making me question my self if i am a dumb by making something like that?, But i mean, this is the main reason i made this org! to make the Dumbest things ever!
+I actually want to build something cool, even if most reasources keep making me question my self if i am a dumb by making something like that?, But i mean, this is the main reason i made this org! to make the Dumbest things ever!
 
 ## Current State
 
