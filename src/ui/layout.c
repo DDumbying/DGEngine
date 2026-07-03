@@ -2,6 +2,7 @@
 #include "../renderer/renderer.h"
 #include "../platform/input.h"
 #include "text.h"
+#include "theme.h"
 #include <SDL2/SDL.h>
 
 #define SCALE_LBL      1.5f
@@ -36,41 +37,44 @@ void ui_layout_gap(UILayout *l, float gap) {
 }
 
 void ui_layout_label(UILayout *l, const char *text, bool small_font) {
+    const Theme *th_ = theme_current();
     float scale = small_font ? SCALE_SMALL : SCALE_BODY;
-    text_draw(l->cursor_x, l->cursor_y, scale, 0.52f, 0.52f, 0.55f, 1.0f, text);
+    text_draw(l->cursor_x, l->cursor_y, scale,
+              th_->text_dim_r, th_->text_dim_g, th_->text_dim_b, 1.0f, text);
     
     float th = text_line_height(scale);
     if (th > l->row_height) l->row_height = th;
     
-    // Auto advance if we aren't in a manual row
     l->cursor_y += th + 2.0f;
 }
 
 bool ui_layout_button(UILayout *l, const char *label, float w, float h, bool active, int mx, int my) {
+    const Theme *th_ = theme_current();
     if (w <= 0.0f) w = l->width;
     
     bool hover = hittest(l->cursor_x, l->cursor_y, w, h, mx, my);
     bool click = hover && input_mouse_button_pressed(SDL_BUTTON_LEFT);
     
-    float bg = active ? 0.48f : (hover ? 0.22f : 0.14f);
+    float bg = active ? (th_->accent_g * 0.55f + 0.15f) : (hover ? 0.22f : 0.14f);
     renderer_draw_quad(l->cursor_x, l->cursor_y, w, h, bg, bg, bg + 0.03f, 1.0f);
     draw_box_border(l->cursor_x, l->cursor_y, w, h,
-                    active ? 0.30f : 0.30f,
-                    active ? 0.80f : 0.30f,
-                    active ? 0.45f : 0.36f);
+                    active ? th_->border_active_r * 0.4f : 0.30f,
+                    active ? th_->border_active_g       : 0.30f,
+                    active ? th_->border_active_b * 0.6f : 0.36f);
     
     float tw = text_measure_width(label, SCALE_BODY);
     float th = text_line_height(SCALE_BODY);
     text_draw(l->cursor_x + (w - tw) * 0.5f, l->cursor_y + (h - th) * 0.5f,
-              SCALE_BODY, 0.90f, 0.90f, 0.90f, 1.0f, label);
+              SCALE_BODY, th_->text_r, th_->text_g, th_->text_b, 1.0f, label);
               
     if (h > l->row_height) l->row_height = h;
-    l->cursor_y += h + 4.0f; /* default gap */
+    l->cursor_y += h + 4.0f;
     
     return click;
 }
 
 bool ui_layout_field(UILayout *l, TextInput *ti, float w, float h, bool focused, int mx, int my, bool *out_enter_pressed) {
+    const Theme *th_ = theme_current();
     if (w <= 0.0f) w = l->width;
     
     bool hover = hittest(l->cursor_x, l->cursor_y, w, h, mx, my);
@@ -79,22 +83,32 @@ bool ui_layout_field(UILayout *l, TextInput *ti, float w, float h, bool focused,
     float fbg = focused ? 0.17f : 0.11f;
     renderer_draw_quad(l->cursor_x, l->cursor_y, w, h, fbg, fbg, fbg, 1.0f);
     draw_box_border(l->cursor_x, l->cursor_y, w, h,
-                    focused ? 0.30f : 0.22f,
-                    focused ? 0.75f : 0.30f,
-                    focused ? 0.45f : 0.22f);
+                    focused ? th_->border_active_r * 0.4f : th_->border_r,
+                    focused ? th_->border_active_g         : th_->border_g,
+                    focused ? th_->border_active_b * 0.6f : th_->border_b);
     
     float th = text_line_height(SCALE_BODY);
+    float text_y = l->cursor_y + (h - th) * 0.5f;
+    float text_x = l->cursor_x + 4.0f;
+    float field_w = w - 8.0f;
+
     bool enter = false;
     if (focused) {
-        enter = textinput_update(ti, l->cursor_x + 4.0f, l->cursor_y + (h - th) * 0.5f, w - 8.0f, SCALE_BODY);
-    } else {
-        textinput_render(ti, l->cursor_x + 4.0f, l->cursor_y + (h - th) * 0.5f, SCALE_BODY, 1.0f, 1.0f, 1.0f, 1.0f);
+        /* BUG FIX: when focused, run update AND render so text is visible while typing.
+           Previously only textinput_update was called (no render), so text was invisible
+           until focus was lost. Now we update (which processes keystrokes) and then
+           always render the buffer + caret. */
+        enter = textinput_update(ti, text_x, text_y, field_w, SCALE_BODY);
     }
+    /* Always render — focused or not. This is the core fix for the "can't see
+       what I'm typing" bug: textinput_render draws the buffer text + blink caret,
+       and it's safe to call whether focused or not (caret just doesn't blink). */
+    textinput_render(ti, text_x, text_y, SCALE_BODY, 1.0f, 1.0f, 1.0f, 1.0f);
     
     if (out_enter_pressed) *out_enter_pressed = enter;
     
     if (h > l->row_height) l->row_height = h;
-    l->cursor_y += h + 4.0f; /* default gap */
+    l->cursor_y += h + 4.0f;
     
     return click;
 }
@@ -104,7 +118,6 @@ void ui_layout_row_begin(UILayout *l) {
 }
 
 void ui_layout_row_step_x(UILayout *l, float x_offset) {
-    /* Step X right, and reverse the auto-Y advance that label/field/button did */
     l->cursor_x = l->start_x + x_offset;
     l->cursor_y -= l->row_height + 4.0f; 
 }

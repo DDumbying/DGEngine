@@ -90,10 +90,10 @@ bool objdef_load_file(ObjectDef *def, const char *path) {
         if (cr) *cr = '\0';
 
         if (strncmp(line, "name=", 5) == 0) {
-            strncpy(def->name, line + 5, OBJDEF_NAME_MAX - 1);
+            snprintf(def->name, OBJDEF_NAME_MAX, "%.*s", OBJDEF_NAME_MAX - 1, line + 5);
 
         } else if (strncmp(line, "sprite=", 7) == 0) {
-            strncpy(def->sprite, line + 7, OBJDEF_NAME_MAX - 1);
+            snprintf(def->sprite, OBJDEF_NAME_MAX, "%.*s", OBJDEF_NAME_MAX - 1, line + 7);
 
         } else if (strncmp(line, "property ", 9) == 0) {
             if (def->prop_count >= OBJDEF_MAX_PROPS) continue;
@@ -102,7 +102,7 @@ bool objdef_load_file(ObjectDef *def, const char *path) {
                 continue;
 
             ObjectProperty *p = &def->props[def->prop_count];
-            strncpy(p->name, pname, OBJDEF_NAME_MAX - 1);
+            snprintf(p->name, OBJDEF_NAME_MAX, "%.*s", OBJDEF_NAME_MAX - 1, pname);
 
             if      (strcmp(ptype, "int")    == 0) p->type = PROP_INT;
             else if (strcmp(ptype, "float")  == 0) p->type = PROP_FLOAT;
@@ -122,8 +122,8 @@ bool objdef_load_file(ObjectDef *def, const char *path) {
             if (sscanf(line + 9, "%63s %255[^\n]", event, script) < 2) continue;
 
             ObjectBehavior *b = &def->behaviors[def->behavior_count++];
-            strncpy(b->event,  event,  OBJDEF_NAME_MAX - 1);
-            strncpy(b->script, script, OBJDEF_PATH_MAX - 1);
+            snprintf(b->event,  OBJDEF_NAME_MAX, "%.*s", OBJDEF_NAME_MAX - 1, event);
+            snprintf(b->script, OBJDEF_PATH_MAX, "%.*s", OBJDEF_PATH_MAX - 1, script);
         }
         /* Lines starting with '#' or unknown keys are silently ignored */
     }

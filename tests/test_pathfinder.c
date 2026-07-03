@@ -3,9 +3,15 @@
 #include <stdlib.h>
 #include "ai/pathfinder.h"
 #include "world/world.h"
+#include "world/tileset.h"
 
-/*  Implement world_get_tile here to avoid linking the full world.c
-    (which pulls in renderer dependencies and requires GL/SDL2). */
+/*  Implement world_get_tile/world_get_tile_mut/world_tile_walkable here
+    to avoid linking the full world.c (which pulls in renderer
+    dependencies and requires GL/SDL2). Tileset-as-data means
+    "walkable" is no longer a property pathfinder.c can read off a raw
+    TerrainType byte — it has to ask the World's own Tileset, so this
+    stub has to actually carry a real (if tiny) Tileset now, not just
+    fake tile storage. */
 const Tile *world_get_tile(const World *w, int x, int y) {
     if (x < 0 || y < 0 || x >= w->width || y >= w->height) return NULL;
     return &w->tiles[y * w->width + x];
@@ -16,6 +22,11 @@ Tile *world_get_tile_mut(World *w, int x, int y) {
     return &w->tiles[y * w->width + x];
 }
 
+bool world_tile_walkable(const World *w, const Tile *t) {
+    if (!t) return false;
+    return tileset_is_walkable(&w->tileset, t->type);
+}
+
 int main(void) {
     World w;
     w.width = 10;
@@ -23,9 +34,17 @@ int main(void) {
     w.tiles = calloc(w.width * w.height, sizeof(Tile));
     assert(w.tiles);
 
-    /* Initialize all tiles to Grass (walkable) */
+    /* Two slots: 0 = walkable ("Grass"), 1 = not walkable ("Water") —
+       stands in for what used to be TERRAIN_GRASS/TERRAIN_WATER. Every
+       test below refers to these by slot index instead of enum value. */
+    tileset_init(&w.tileset);
+    int GRASS = tileset_add_slot(&w.tileset, "Grass");
+    int WATER = tileset_add_slot(&w.tileset, "Water");
+    tileset_set_walkable(&w.tileset, WATER, false);
+
+    /* Initialize all tiles to the walkable slot */
     for (int i = 0; i < w.width * w.height; i++) {
-        w.tiles[i].type = TERRAIN_GRASS;
+        w.tiles[i].type = GRASS;
     }
 
     /* 1. Trivial test: start == goal */
@@ -65,7 +84,7 @@ int main(void) {
        . . . (walkable at y=3)
     */
     for (int y = 0; y < 3; y++) {
-        w.tiles[y * w.width + 1].type = TERRAIN_WATER;
+        w.tiles[y * w.width + 1].type = WATER;
     }
     {
         Path path;
@@ -83,9 +102,9 @@ int main(void) {
     }
 
     /* 4. Unreachable test: goal surrounded by water */
-    w.tiles[0 * w.width + 9].type = TERRAIN_WATER;
-    w.tiles[1 * w.width + 8].type = TERRAIN_WATER;
-    w.tiles[1 * w.width + 9].type = TERRAIN_WATER;
+    w.tiles[0 * w.width + 9].type = WATER;
+    w.tiles[1 * w.width + 8].type = WATER;
+    w.tiles[1 * w.width + 9].type = WATER;
     /* (0, 9) is surrounded by water and boundary */
     {
         Path path;
@@ -93,6 +112,20 @@ int main(void) {
         assert(!found);
         assert(path.len == 0);
         printf("PASS: unreachable goal correctly identified\n");
+    }
+
+    /* 5. Undefined-slot test: a tile whose type references a slot
+       index that doesn't exist in the Tileset (e.g. -1, the "never
+       painted" default) must be treated as unwalkable — same "refuse
+       to path into ground that was never actually defined" reasoning
+       as tileset_is_walkable()'s own doc comment. */
+    {
+        Tile undefined_tile;
+        undefined_tile.type = -1;
+        undefined_tile.variant = 0;
+        undefined_tile.height = 0.0f;
+        assert(!world_tile_walkable(&w, &undefined_tile));
+        printf("PASS: undefined tile slot treated as unwalkable\n");
     }
 
     free(w.tiles);

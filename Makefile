@@ -9,9 +9,9 @@ CC      = gcc
 STD     = -std=c11
 WARN    = -Wall -Wextra -Wpedantic
 
-INCLUDES = -Iexternal/glad/include -Iexternal/stb -Isrc
+INCLUDES = -Iexternal/glad/include -Iexternal/stb -Isrc -I/usr/include/lua5.4
 
-LIBS     = -lSDL2 -lGL -lm
+LIBS     = -lSDL2 -lGL -lm -llua5.4
 
 SRC     = $(shell find src external -name "*.c")
 OUT     = bin/dgengine
@@ -35,7 +35,7 @@ debug:
 # build and run anywhere — useful in CI or anywhere without a display.
 TEST_DIR = bin/tests
 
-test: $(TEST_DIR)/test_registry $(TEST_DIR)/test_picking $(TEST_DIR)/test_pathfinder $(TEST_DIR)/test_weather $(TEST_DIR)/test_simulation $(TEST_DIR)/test_construction $(TEST_DIR)/test_spatial_grid
+test: $(TEST_DIR)/test_registry $(TEST_DIR)/test_picking $(TEST_DIR)/test_pathfinder $(TEST_DIR)/test_weather $(TEST_DIR)/test_simulation $(TEST_DIR)/test_construction $(TEST_DIR)/test_spatial_grid $(TEST_DIR)/test_world_save $(TEST_DIR)/test_world_generator
 	@echo "--- running tests ---"
 	@./$(TEST_DIR)/test_registry
 	@./$(TEST_DIR)/test_picking
@@ -44,6 +44,8 @@ test: $(TEST_DIR)/test_registry $(TEST_DIR)/test_picking $(TEST_DIR)/test_pathfi
 	@./$(TEST_DIR)/test_simulation
 	@./$(TEST_DIR)/test_construction
 	@./$(TEST_DIR)/test_spatial_grid
+	@./$(TEST_DIR)/test_world_save
+	@./$(TEST_DIR)/test_world_generator
 
 $(TEST_DIR)/test_registry: tests/test_registry.c src/ecs/registry.c src/core/log.c
 	@mkdir -p $(TEST_DIR)
@@ -70,6 +72,14 @@ $(TEST_DIR)/test_construction: tests/test_construction.c src/simulation/construc
 	$(CC) $(CFLAGS_DEBUG) $(INCLUDES) $^ -o $@ -lm
 
 $(TEST_DIR)/test_spatial_grid: tests/test_spatial_grid.c src/world/spatial_grid.c src/core/log.c
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS_DEBUG) $(INCLUDES) $^ -o $@ -lm
+
+$(TEST_DIR)/test_world_save: tests/test_world_save.c src/world/world.c src/core/log.c
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS_DEBUG) $(INCLUDES) $^ -o $@ -lm
+
+$(TEST_DIR)/test_world_generator: tests/test_world_generator.c src/world/world.c src/world/world_generator.c src/core/log.c
 	@mkdir -p $(TEST_DIR)
 	$(CC) $(CFLAGS_DEBUG) $(INCLUDES) $^ -o $@ -lm
 

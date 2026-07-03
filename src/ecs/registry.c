@@ -148,13 +148,17 @@ DefinitionComponent *entity_get_definition(Registry *r, Entity e) {
    Save / load — see the format comment in registry.h. */
 
 #define DGEE_MAGIC   "DGEE"
-#define DGEE_VERSION 7u   /* Phase: construction hookup for user-defined
-                             buildable objects -- ConstructionComponent
-                             gained is_custom + def_name. Phase L's
-                             version 6 also lives here (DefinitionComponent
-                             added; fixed sprite_id never being written/
-                             read for RenderableComponent, a latent bug
-                             since Phase E) */
+#define DGEE_VERSION 8u   /* Phase 2 (ObjectDef consolidation): BuildingKind
+                             retired -- ConstructionComponent drops kind +
+                             is_custom, keeps only build_time_total/done,
+                             complete, def_name (always populated now,
+                             every blueprint is an ObjectDef instance).
+                             Version 7 was the construction hookup for
+                             user-defined buildable objects (is_custom +
+                             def_name added alongside the old kind field).
+                             Version 6 added DefinitionComponent and fixed
+                             sprite_id never being written/read for
+                             RenderableComponent, a latent bug since Phase E. */
 
 #define MASK_TRANSFORM     (1u << 0)
 #define MASK_RENDERABLE    (1u << 1)
@@ -235,14 +239,10 @@ bool registry_save(const Registry *r, const char *path) {
         }
         if (ok && (mask & MASK_CONSTRUCTION)) {
             const ConstructionComponent *c = &r->construction[e];
-            unsigned char kind_byte = (unsigned char)c->kind;
             unsigned char complete_byte = (unsigned char)(c->complete ? 1 : 0);
-            unsigned char custom_byte = (unsigned char)(c->is_custom ? 1 : 0);
-            ok &= fwrite(&kind_byte,            1,                          1, f) == 1;
             ok &= fwrite(&c->build_time_total,  sizeof(c->build_time_total), 1, f) == 1;
             ok &= fwrite(&c->build_time_done,   sizeof(c->build_time_done),  1, f) == 1;
             ok &= fwrite(&complete_byte,        1,                          1, f) == 1;
-            ok &= fwrite(&custom_byte,           1,                          1, f) == 1;
             ok &= fwrite(c->def_name,            1,             OBJDEF_NAME_MAX, f) == OBJDEF_NAME_MAX;
         }
         if (ok && (mask & MASK_DEFINITION)) {
@@ -371,25 +371,63 @@ bool registry_load(Registry *r, const char *path) {
         if ((mask & MASK_CONSTRUCTION)) {
             ConstructionComponent c;
             memset(&c, 0, sizeof(c));
-            unsigned char kind_byte, complete_byte;
-            if (fread(&kind_byte, 1, 1, f) != 1) { ok = false; break; }
-            if (fread(&c.build_time_total, sizeof(c.build_time_total), 1, f) != 1) { ok = false; break; }
-            if (fread(&c.build_time_done,  sizeof(c.build_time_done),  1, f) != 1) { ok = false; break; }
-            if (fread(&complete_byte, 1, 1, f) != 1) { ok = false; break; }
-            c.kind     = (BuildingKind)kind_byte;
-            c.complete = (complete_byte != 0);
-            if (version >= 7) {
-                /* Versions <7 never wrote these (see the DGEE_VERSION
-                   comment) -- gated on the file's own version, same
-                   reasoning as the sprite_id gate above. */
-                unsigned char custom_byte;
-                if (fread(&custom_byte, 1, 1, f) != 1) { ok = false; break; }
+            unsigned char complete_byte;
+
+            if (version >= 8u) {
+                /* Current format: no kind, no is_custom -- every
+                   blueprint is ObjectDef-driven, def_name is always
+                   meaningful. */
+                if (fread(&c.build_time_total, sizeof(c.build_time_total), 1, f) != 1) { ok = false; break; }
+                if (fread(&c.build_time_done,  sizeof(c.build_time_done),  1, f) != 1) { ok = false; break; }
+                if (fread(&complete_byte, 1, 1, f) != 1) { ok = false; break; }
                 if (fread(c.def_name, 1, OBJDEF_NAME_MAX, f) != OBJDEF_NAME_MAX) { ok = false; break; }
-                c.is_custom = (custom_byte != 0);
+                c.complete = (complete_byte != 0);
                 c.def_name[OBJDEF_NAME_MAX - 1] = '\0';
             } else {
-                c.is_custom = false;
-                c.def_name[0] = '\0';
+                /* v7 and earlier wrote a leading kind byte (the old
+                   BuildingKind, always 0 = BUILDING_CAMPFIRE, since
+                   that enum only ever had one entry) before the float
+                   fields. Consume and discard it -- there's nothing
+                   left in the engine that understands BuildingKind
+                   values, so there's nothing meaningful to migrate it
+                   *into* beyond the def_name fallback below. */
+                unsigned char kind_byte;
+                if (fread(&kind_byte, 1, 1, f) != 1) { ok = false; break; }
+                (void)kind_byte;
+                if (fread(&c.build_time_total, sizeof(c.build_time_total), 1, f) != 1) { ok = false; break; }
+                if (fread(&c.build_time_done,  sizeof(c.build_time_done),  1, f) != 1) { ok = false; break; }
+                if (fread(&complete_byte, 1, 1, f) != 1) { ok = false; break; }
+                c.complete = (complete_byte != 0);
+
+                if (version >= 7) {
+                    /* v7 already had is_custom + def_name alongside the
+                       old kind field. If is_custom was true, def_name
+                       is already the right ObjectDef name -- keep it.
+                       If it was false (an old BUILDING_CAMPFIRE
+                       blueprint), synthesize "Campfire" as the def_name:
+                       this is a save-compat migration, not a claim that
+                       an ObjectDef named "Campfire" is guaranteed to
+                       exist in the loaded project -- same honest-failure
+                       posture as world.c's v3->v4 Tileset migration.
+                       If the project never defines one, this entity's
+                       construction lookups just fail to resolve a real
+                       ObjectDef and log a warning at the call site,
+                       exactly like any other renamed/deleted def would. */
+                    unsigned char custom_byte;
+                    if (fread(&custom_byte, 1, 1, f) != 1) { ok = false; break; }
+                    if (fread(c.def_name, 1, OBJDEF_NAME_MAX, f) != OBJDEF_NAME_MAX) { ok = false; break; }
+                    c.def_name[OBJDEF_NAME_MAX - 1] = '\0';
+                    bool was_custom = (custom_byte != 0);
+                    if (!was_custom)
+                        snprintf(c.def_name, sizeof(c.def_name), "Campfire");
+                } else {
+                    /* Pre-v7: no def_name at all, no is_custom -- every
+                       construction was implicitly BUILDING_CAMPFIRE
+                       (the only BuildingKind that ever existed). Same
+                       migration target as the v7 !was_custom case
+                       above, for the same reason. */
+                    snprintf(c.def_name, sizeof(c.def_name), "Campfire");
+                }
             }
             entity_add_construction(loaded, e, c);
         }

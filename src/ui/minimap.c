@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include "../renderer/renderer.h"
+#include "../world/tileset.h"
 
 #define MINIMAP_MARGIN 10.0f
 
@@ -40,11 +41,22 @@ void minimap_render(const World *world, Registry *reg, const Camera *cam,
         for (int gx = 0; gx < world->width; gx++) {
             const Tile *t = world_get_tile(world, gx, gy);
             if (!t) continue;
-            TileColor c = tile_base_color(t->type);
+            /* No per-tile pixel color to sample cheaply here (that would
+               mean reading GL texture data back per minimap tile, once
+               per frame — not worth it for a corner overview). Instead:
+               a defined slot with a sprite assigned reads as a neutral
+               "something's there" gray, an undefined/unassigned slot
+               reads as the same missing-texture magenta the main view
+               uses, so the minimap never silently claims to know a
+               color the world itself doesn't have an answer for. */
+            int sid = tileset_sprite_for(&world->tileset, t->type);
+            float r, g, b;
+            if (sid >= 0) { r = 0.42f; g = 0.42f; b = 0.46f; }
+            else          { r = 0.85f; g = 0.10f; b = 0.85f; }
             renderer_draw_quad(box_x + (float)gx * cell_w,
                                 box_y + (float)gy * cell_h,
                                 cell_w, cell_h,
-                                c.r, c.g, c.b, 1.0f);
+                                r, g, b, 1.0f);
         }
     }
 

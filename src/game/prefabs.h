@@ -4,33 +4,25 @@
 #include "../ecs/registry.h"
 #include "../core/object_def.h"
 
-/*  A "prefab" here is just a function that creates an entity with a
-    fixed set of components — no data-driven prefab format yet (that's
-    a Simulation/Modding-phase question: do prefabs come from a JSON
-    table, a script, or stay hardcoded like this?). For now there are
-    exactly two, shared between main.c's demo spawner and the editor's
-    placement mode, so the definition lives in one place. */
-typedef enum {
-    PREFAB_TREE = 0,
-    PREFAB_ROCK,
-    PREFAB_WORKER,
-    PREFAB_COUNT
-} PrefabKind;
+/*  Phase 2 (ObjectDef consolidation): PrefabKind — the hardcoded
+    tree/rock/worker enum and its prefab_spawn()/prefab_name() — has
+    been retired. Every placeable thing is an ObjectDef now (see
+    core/object_def.h); PLACE mode's palette lists whatever the active
+    project has defined in its objects/ folder, exactly the same shape
+    PAINT mode's palette lists whatever the project has defined in its
+    Tileset (see world/tileset.h, Phase 1). A fresh project's
+    ObjectDefRegistry starts empty — same "honest, no hidden default
+    content" reasoning as a fresh project's empty Tileset.
 
-/* Human-readable name, for log messages. */
-const char *prefab_name(PrefabKind kind);
+    This file now holds exactly one function: the data-driven spawn
+    path. It lives here (not core/object_def.c) because spawning is
+    ECS- and atlas-aware territory (Registry, sprite_id), which core/
+    deliberately stays free of — object_def.c only knows how to
+    read/write/hold ObjectDef data, never how to turn one into a live
+    entity. */
 
-/* Creates an entity at grid position (gx, gy) with the given prefab's
-   components. Returns ENTITY_NULL if the registry is full. */
-Entity prefab_spawn(Registry *reg, PrefabKind kind, float gx, float gy);
-
-/*  Phase L->World: the data-driven counterpart to prefab_spawn() above
-    — creates an entity from a user-defined ObjectDef instead of a
-    hardcoded PrefabKind. Lives here (not in core/object_def.c) because
-    spawning is ECS- and atlas-aware territory (Registry, sprite_id),
-    which core/ deliberately stays free of — object_def.c only knows
-    how to read/write/hold ObjectDef data, never how to turn one into
-    live entities.
+/*  Creates an entity from a user-defined ObjectDef. Returns
+    ENTITY_NULL if the registry is full.
 
     sprite_id is resolved by the caller (main.c/panel.c, which already
     has the SpritesTab name->id table — see sprites_tab_find_id()) and
@@ -49,7 +41,8 @@ Entity prefab_spawn(Registry *reg, PrefabKind kind, float gx, float gy);
     properties you set in the Objects tab actually do something" true
     instead of cosmetic — every other property is still recorded in
     the ObjectDef and visible in the Inspector, it just isn't engine
-    behavior (that's Phase N's job, once scripts can read them). */
+    behavior (that's a scripting-phase job, once scripts can read
+    them). */
 Entity objdef_spawn_instance(Registry *reg, const ObjectDef *def, int sprite_id,
                               float gx, float gy);
 

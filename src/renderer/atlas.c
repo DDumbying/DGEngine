@@ -128,21 +128,3 @@ UVRect atlas_get_uv(const SpriteAtlas *a, SpriteId id) {
         return (UVRect){ 0.0f, 0.0f, 1.0f, 1.0f };
     return a->sprites[id];
 }
-
-SpriteId sprite_id_for_prefab(PrefabKind k) {
-    switch (k) {
-        case PREFAB_TREE:   return SPRITE_TREE;
-        case PREFAB_ROCK:   return SPRITE_ROCK;
-        case PREFAB_WORKER: return SPRITE_WORKER;
-        default:            return SPRITE_NONE;
-    }
-}
-
-SpriteId sprite_id_for_building(BuildingKind k, bool complete) {
-    switch (k) {
-        case BUILDING_CAMPFIRE:
-            return complete ? SPRITE_CAMPFIRE_COMPLETE : SPRITE_CAMPFIRE_BLUEPRINT;
-        default:
-            return SPRITE_NONE;
-    }
-}

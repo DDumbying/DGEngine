@@ -7,53 +7,10 @@
 #include "../renderer/atlas.h"
 
 /* ---------------------------------------------------------------------
-   Building catalog. One BuildingKind today; every entry is a switch so
-   a second building extends these, not a redesign. */
-
-#define CAMPFIRE_COST_WOOD   20
-#define CAMPFIRE_BUILD_TIME  6.0f /* seconds of worker labor */
-
-const char *building_name(BuildingKind kind) {
-    switch (kind) {
-        case BUILDING_CAMPFIRE: return "campfire";
-        default:                 return "unknown";
-    }
-}
-
-ResourceKind building_cost_kind(BuildingKind kind) {
-    switch (kind) {
-        case BUILDING_CAMPFIRE: return RESOURCE_WOOD;
-        default:                 return RESOURCE_WOOD;
-    }
-}
-
-int building_cost_amount(BuildingKind kind) {
-    switch (kind) {
-        case BUILDING_CAMPFIRE: return CAMPFIRE_COST_WOOD;
-        default:                 return 0;
-    }
-}
-
-float building_build_time(BuildingKind kind) {
-    switch (kind) {
-        case BUILDING_CAMPFIRE: return CAMPFIRE_BUILD_TIME;
-        default:                 return 0.0f;
-    }
-}
-
-bool building_can_afford(const ResourceStore *rs, BuildingKind kind) {
-    int amount = building_cost_amount(kind);
-    return building_cost_kind(kind) == RESOURCE_WOOD
-         ? resource_store_has_wood(rs, amount)
-         : resource_store_has_stone(rs, amount);
-}
-
-bool building_try_pay_cost(ResourceStore *rs, BuildingKind kind) {
-    int amount = building_cost_amount(kind);
-    return building_cost_kind(kind) == RESOURCE_WOOD
-         ? resource_store_try_spend_wood(rs, amount)
-         : resource_store_try_spend_stone(rs, amount);
-}
+   Cost / afford / pay — all resolved from an ObjectDef's own
+   properties via objdef_get_build_spec() (core/object_def.h), never
+   from a hardcoded enum. See construction.h's doc comment for why the
+   old BuildingKind-driven versions of these three functions retired. */
 
 bool objdef_can_afford_build(const ResourceStore *rs, const ObjectDef *def) {
     ResourceKind kind; int amount; float build_time;
@@ -80,50 +37,7 @@ void objdef_refund_build_cost(ResourceStore *rs, const ObjectDef *def) {
 }
 
 /* ---------------------------------------------------------------------
-   Visuals. Blueprint = dim/translucent outline of the finished color;
-   finished = full opacity, slightly larger. Kept here (not prefabs.c)
-   since these are construction states of a building, not a standalone
-   spawnable prefab. */
-
-static RenderableComponent blueprint_look(BuildingKind kind) {
-    switch (kind) {
-        case BUILDING_CAMPFIRE:
-            return (RenderableComponent){1.0f, 1.0f, 1.0f, 0.55f, 28.0f, 28.0f, SPRITE_CAMPFIRE_BLUEPRINT};
-        default:
-            return (RenderableComponent){0.5f, 0.5f, 0.5f, 0.45f, 28.0f, 28.0f, SPRITE_NONE};
-    }
-}
-
-static RenderableComponent finished_look(BuildingKind kind) {
-    switch (kind) {
-        case BUILDING_CAMPFIRE:
-            return (RenderableComponent){1.0f, 1.0f, 1.0f, 1.0f, 28.0f, 32.0f, SPRITE_CAMPFIRE_COMPLETE};
-        default:
-            return (RenderableComponent){0.5f, 0.5f, 0.5f, 1.0f, 28.0f, 28.0f, SPRITE_NONE};
-    }
-}
-
-/* ---------------------------------------------------------------------
    Placement, labor, rendering. */
-
-Entity construction_place_blueprint(Registry *reg, BuildingKind kind, float gx, float gy) {
-    Entity e = entity_create(reg);
-    if (e == ENTITY_NULL) return ENTITY_NULL;
-
-    entity_add_transform(reg, e, (TransformComponent){gx, gy});
-    entity_add_renderable(reg, e, blueprint_look(kind));
-
-    ConstructionComponent c;
-    memset(&c, 0, sizeof(c));
-    c.kind             = kind;
-    c.build_time_total = building_build_time(kind);
-    c.build_time_done  = 0.0f;
-    c.complete         = false;
-    c.is_custom        = false;
-    entity_add_construction(reg, e, c);
-
-    return e;
-}
 
 Entity construction_place_blueprint_objdef(Registry *reg, const ObjectDef *def,
                                             int sprite_id, float gx, float gy) {
@@ -133,13 +47,11 @@ Entity construction_place_blueprint_objdef(Registry *reg, const ObjectDef *def,
     entity_add_transform(reg, e, (TransformComponent){gx, gy});
 
     /* Blueprint look: the object's real sprite, dimmed/translucent so
-       it reads as "not finished yet" without needing a second sprite
-       per object the way BUILDING_CAMPFIRE's blueprint_look() does --
-       custom objects only define one sprite, so the look has to come
-       from tint/alpha instead of a swapped sprite_id. Same default
-       size as objdef_spawn_instance()'s instant-placement path. */
+       it reads as "not finished yet" — a user-defined object only ever
+       defines one sprite, so the "in progress" look comes from
+       tint/alpha rather than a second swapped sprite_id. */
     entity_add_renderable(reg, e, (RenderableComponent){
-        0.65f, 0.7f, 1.0f, 0.55f, 24.0f, 32.0f, sprite_id});
+        0.65f, 0.7f, 1.0f, 0.55f, 24.0f, 32.0f, sprite_id, 1, 0.0f, 0.0f, 0});
 
     ResourceKind cost_kind; int cost_amount; float build_time;
     objdef_get_build_spec(def, &cost_kind, &cost_amount, &build_time);
@@ -150,7 +62,6 @@ Entity construction_place_blueprint_objdef(Registry *reg, const ObjectDef *def,
     c.build_time_total = build_time;
     c.build_time_done   = 0.0f;
     c.complete          = false;
-    c.is_custom         = true;
     snprintf(c.def_name, sizeof(c.def_name), "%s", def->name);
     entity_add_construction(reg, e, c);
 
@@ -168,18 +79,13 @@ bool system_build_entity(Registry *reg, Entity e, float labor_seconds) {
         c->build_time_done = c->build_time_total;
         c->complete = true;
 
-        if (c->is_custom) {
-            /* No second sprite to swap to (see the blueprint-look
-               comment in construction_place_blueprint_objdef) -- just
-               clear the dimmed/translucent tint back to full opacity,
-               keeping whatever sprite_id was already there. */
-            RenderableComponent *rd = entity_get_renderable(reg, e);
-            if (rd) { rd->r = rd->g = rd->b = rd->a = 1.0f; }
-            LOG_INFO("Entity %u finished building '%s'", e, c->def_name);
-        } else {
-            entity_add_renderable(reg, e, finished_look(c->kind));
-            LOG_INFO("Entity %u finished building %s", e, building_name(c->kind));
-        }
+        /* No second sprite to swap to (see the blueprint-look comment
+           in construction_place_blueprint_objdef) — just clear the
+           dimmed/translucent tint back to full opacity, keeping
+           whatever sprite_id was already there. */
+        RenderableComponent *rd = entity_get_renderable(reg, e);
+        if (rd) { rd->r = rd->g = rd->b = rd->a = 1.0f; }
+        LOG_INFO("Entity %u finished building '%s'", e, c->def_name);
         return true;
     }
     return false;

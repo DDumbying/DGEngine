@@ -22,6 +22,7 @@
 #include "renderer/atlas.h"
 #include "renderer/asset_library.h"
 #include "world/world.h"
+#include "world/world_generator.h"
 #include "world/spatial_grid.h"
 #include "ecs/registry.h"
 #include "ecs/systems.h"
@@ -37,12 +38,15 @@
 #include "ui/text.h"
 #include "ui/font_atlas.h"
 #include "ui/panel.h"
+#include "ui/shape_pane.h"
 #include "ui/minimap.h"
 #include "ui/project_manager.h"
 #include "ui/tabbar.h"
 #include "ui/sprites_tab.h"
 #include "ui/objects_tab.h"
 #include "ui/settings_tab.h"
+#include "ui/theme.h"
+#include "scripting/lua_host.h"
 
 #define WINDOW_W 1280
 #define WINDOW_H  720
@@ -56,6 +60,13 @@ typedef enum {
     SCREEN_PROJECT_MANAGER,
     SCREEN_EDITOR,
 } Screen;
+
+/* Shim: bridges AgentEventCB(entity, event, userdata) signature to
+   lua_host_call_behavior(host, entity, event).  File-scope so it's
+   valid C11 (nested functions are a GCC extension, not standard). */
+static void lua_event_cb(Entity e, const char *event, void *ud) {
+    lua_host_call_behavior((LuaHost *)ud, e, event);
+}
 
 int main(void) {
     Window window;
@@ -71,6 +82,14 @@ int main(void) {
     /* Phase 3 — texture font atlas (graceful fallback to bitmap if absent) */
     if (!font_atlas_load("assets/font.png"))
         LOG_WARN("Font atlas not found — falling back to legacy bitmap font");
+
+    /* Theme — single global palette every UI file reads through
+       theme_current(). Tries themes/default.theme relative to the
+       binary's launch cwd (not the project folder — themes are an
+       engine-level preference, not per-project, so this load happens
+       once here rather than inside ENTER_EDITOR's per-project chdir). */
+    theme_reset_default();
+    theme_load("themes/default.theme");
 
     dge_time_tick();
 
@@ -90,12 +109,15 @@ int main(void) {
     SpatialGrid        sgrid;   memset(&sgrid,   0, sizeof sgrid);
     Editor             editor;
     Panel              panel;
+    ShapePane          shape_pane; shape_pane_init(&shape_pane);
+    EditorMode         prev_editor_mode = EDITOR_MODE_PAINT;
     SimClock           sim_clock;
     ResourceStore      resources;
     WeatherSystem      weather;
     Camera             camera;
     ObjectDefRegistry  obj_registry;
     objdef_registry_init(&obj_registry);
+    LuaHost *lua = lua_host_create();
 
     /* Phase J — tab workspace */
     TabBar      tabbar;
@@ -109,7 +131,17 @@ int main(void) {
     ObjectsTab  objects_tab;
     memset(&objects_tab, 0, sizeof objects_tab);
 
-    /* Phase O — settings tab */
+    /* Phase O — settings tab + editor-wide settings */
+    EditorSettings editor_settings;
+    editor_settings_init(&editor_settings);
+    if (editor_settings_load(&editor_settings)) {
+        LOG_INFO("Editor settings loaded from disk");
+        /* Re-apply whichever theme file was active last session — the
+           startup theme_load("themes/default.theme") above ran before
+           we knew this, so this can override it with the saved choice. */
+        if (editor_settings.theme_path[0])
+            theme_load(editor_settings.theme_path);
+    }
     SettingsTab settings_tab;
     memset(&settings_tab, 0, sizeof settings_tab);
 
@@ -137,7 +169,10 @@ int main(void) {
             LOG_ERROR("world_create failed."); break;                          \
         }                                                                      \
         world_clear(&world);                                                   \
-        world_load(&world, WORLD_SAVE_PATH);                                   \
+        if (!world_load(&world, WORLD_SAVE_PATH)) {                           \
+            world_topology_generate(&world, project.topology,                 \
+                                     (unsigned int)SDL_GetTicks());           \
+        }                                                                      \
         registry_init(&registry);                                              \
         registry_load(&registry, ENTITY_SAVE_PATH);                           \
         sgrid_create(&sgrid, world.width, world.height);                       \
@@ -150,6 +185,7 @@ int main(void) {
           }                                                                    \
         }                           \
         editor_init(&editor);                                                  \
+        shape_pane_init(&shape_pane);                                          \
         panel_init(&panel, project.grid_w, project.grid_h);                   \
         simclock_init(&sim_clock);                                             \
         resource_store_init(&resources);                                       \
@@ -163,7 +199,9 @@ int main(void) {
         sprites_tab_init(&sprites_tab, &atlas, &assets);                       \
         objects_tab_init(&objects_tab, &obj_registry, &sprites_tab);          \
         objdef_registry_load_all(&obj_registry);                               \
-        settings_tab_init(&settings_tab, &project);                            \
+        lua_host_set_context(lua, &registry, &obj_registry, &resources);      \
+        lua_host_set_genre(lua, project.genre);                               \
+        settings_tab_init(&settings_tab, &project, &editor_settings);           \
         tabbar_init(&tabbar);                                                  \
         editor_ready = true;                                                   \
         LOG_INFO("Editor ready: '%s' (%dx%d)", project.name,                  \
@@ -255,6 +293,7 @@ int main(void) {
                 registry_save(&registry, ENTITY_SAVE_PATH);
                 simulation_save(&sim_clock, &resources, SIM_SAVE_PATH);
                 weather_save(&weather, WEATHER_SAVE_PATH);
+                editor_settings_save(&editor_settings);
                 LOG_INFO("Project saved.");
             }
             if (input_key_pressed(SDL_SCANCODE_F9)) {
@@ -275,14 +314,69 @@ int main(void) {
             }
         }
 
-        /* ---- Simulation tick (always, regardless of tab or mode --
-           a playtest needs the same simulation running as Edit's
-           sandbox preview does) ---- */
+        /* ---- Simulation tick ----
+           Only GENRE_SANDBOX_SIM runs SimClock/weather/agent-AI on its
+           own — that's the genre that has resources, weather and the
+           HARVEST/BUILD task vocabulary to drive in the first place.
+
+           TACTICS and FREEFORM skip this block entirely rather than
+           ticking a clock and weather system nothing in those genres
+           reads. A tactics game advances on turn-end events instead of
+           continuous gdt, and a freeform project's own Lua scripts are
+           expected to drive whatever timing model they want, including
+           calling simclock_tick() themselves if they happen to want
+           one — the engine just isn't assuming it on their behalf. */
         float dt  = dge_time_delta();
-        float gdt = simclock_tick(&sim_clock, dt);
-        weather_update(&weather, gdt, dt, &camera);
-        float spd = weather_speed_multiplier(weather.type);
-        system_update_agents(&registry, &world, &sgrid, &resources, gdt, spd);
+        float gdt = 0.0f;
+        if (project.genre == GENRE_SANDBOX_SIM) {
+            gdt = simclock_tick(&sim_clock, dt);
+            weather_update(&weather, gdt, dt, &camera);
+            float spd = weather_speed_multiplier(weather.type);
+            system_update_agents(&registry, &world, &sgrid, &resources, gdt, spd,
+                                  lua ? lua_event_cb : NULL, lua);
+        }
+
+        /* Fire on_tick for every alive entity that has an ObjectDef
+           with that behavior. For GENRE_SANDBOX_SIM this only fires
+           when the sim clock actually advanced (gdt > 0) — ticking
+           scripts on a frozen clock would be wasted work in a genre
+           that already has its own pacing. For TACTICS/FREEFORM there
+           is no sim clock driving anything, so on_tick fires every
+           real frame instead — it's the only per-frame hook those
+           genres get, and scripts there are expected to do their own
+           "did meaningful time pass" gating if they need it (e.g. a
+           tactics game's scripts checking "is it this unit's turn"
+           rather than relying on a clock the engine isn't running). */
+        bool should_tick_scripts = (project.genre == GENRE_SANDBOX_SIM)
+                                    ? (gdt > 0.0f) : true;
+        if (should_tick_scripts && lua) {
+            for (int _e = 0; _e < MAX_ENTITIES; _e++) {
+                if (!registry.alive[_e] || !registry.has_definition[_e]) continue;
+                lua_host_call_behavior(lua, (Entity)_e, "on_tick");
+            }
+        }
+
+        /* Fire on_click in Play mode: LMB on a tile that holds an
+           entity triggers that entity's on_click behavior.  In Edit
+           mode clicking is for SELECT, not script dispatch. */
+        if (mode == MODE_PLAY && cur_tab == TAB_WORLD && lua) {
+            if (input_mouse_button_pressed(SDL_BUTTON_LEFT)) {
+                int _mx, _my; input_mouse_pos(&_mx, &_my);
+                /* Only fire if the click is in the world viewport (not
+                   over the tab bar at the top). */
+                if (_my > TABBAR_H) {
+                    Vec2 _w = camera_screen_to_world(&camera, (float)_mx, (float)_my);
+                    float _fgx, _fgy;
+                    renderer_world_to_grid(_w.x, _w.y, &_fgx, &_fgy);
+                    int _gx = (int)(_fgx + 0.5f), _gy = (int)(_fgy + 0.5f);
+                    if (_gx >= 0 && _gy >= 0 && _gx < world.width && _gy < world.height) {
+                        Entity _hit = sgrid_at(&sgrid, _gx, _gy);
+                        if (_hit != ENTITY_NULL)
+                            lua_host_call_behavior(lua, _hit, "on_click");
+                    }
+                }
+            }
+        }
 
         /* Pause toggle -- valid in both modes; pausing a running
            playtest is a reasonable thing to want, not just an Edit
@@ -291,6 +385,13 @@ int main(void) {
             if (input_key_pressed(SDL_SCANCODE_P) && cur_tab == TAB_WORLD) {
                 if (simclock_is_paused(&sim_clock)) simclock_resume(&sim_clock);
                 else simclock_pause(&sim_clock);
+            }
+            /* Ctrl+R — reload all Lua scripts from disk.  Useful when
+               iterating on a script without restarting the engine. */
+            if (lua && input_key_pressed(SDL_SCANCODE_R)
+                && (input_key_down(SDL_SCANCODE_LCTRL) || input_key_down(SDL_SCANCODE_RCTRL))) {
+                lua_host_clear_cache(lua);
+                LOG_INFO("Lua script cache cleared (Ctrl+R)");
             }
             if (input_key_pressed(SDL_SCANCODE_H) && cur_tab == TAB_WORLD && mode == MODE_EDIT) {
                 if (entity_handle_valid(&registry, editor.selected)) {
@@ -335,7 +436,7 @@ int main(void) {
         if (cur_tab == TAB_WORLD && mode == MODE_EDIT) {
             PanelAction pa;
             panel_update(&panel, &editor, &resources, &weather,
-                        &obj_registry, &sprites_tab, vw, vh, &pa);
+                        &obj_registry, &sprites_tab, &atlas, &world, project.genre, vw, vh, &pa);
             switch (pa.type) {
                 case PANEL_ACTION_NEW:
                     world_clear(&world); registry_init(&registry);
@@ -370,8 +471,41 @@ int main(void) {
                     weather_set_type(&weather, (WeatherType)pa.weather_type); break;
                 default: break;
             }
+
+            /* ---- Shape Pane (flat-grid mask painter, docked right) ----
+               Live-linked to world.shape: shape_pane_update() writes
+               directly into the same struct world_render() reads, so
+               there's no apply step -- painting here shows up in the
+               isometric view the very next frame. Only active while in
+               EDITOR_MODE_SHAPE; shape_pane_fit_to_world() re-frames the
+               flat grid once on entry so it doesn't open scrolled to
+               wherever a previous session left it relative to a since-
+               resized world. */
+            if (editor.mode == EDITOR_MODE_SHAPE) {
+                if (prev_editor_mode != EDITOR_MODE_SHAPE)
+                    shape_pane_fit_to_world(&shape_pane, &world, vh);
+                shape_pane_update(&shape_pane, &world, vw, vh);
+            }
+            prev_editor_mode = editor.mode;
+
+            /* editor_update() always runs (TAB mode-switching and other
+               non-mouse handling must work regardless of where the
+               cursor is) but is told to exclude the Shape Pane's screen
+               region from tile hit-testing while it's open -- see
+               editor.h's ui_right_margin doc comment. Without this, a
+               click inside the flat pane could ALSO land on whatever
+               isometric tile happens to render underneath that same
+               screen region (the iso camera can pan/zoom such that
+               world tiles visually extend under a right-docked panel),
+               double-painting one click in two different grid positions.
+               Outside SHAPE mode the pane isn't shown, so 0 disables
+               the exclusion entirely -- same convention ui_panel_width
+               already uses for "no panel here". */
+            int shape_pane_right_margin =
+                (editor.mode == EDITOR_MODE_SHAPE) ? (vw - SHAPE_PANE_W) : 0;
             editor_update(&editor, &registry, &world, &camera, &resources,
-                          &sgrid, panel_effective_width(&panel), TABBAR_H + STATUS_BAR_H);
+                          &sgrid, panel_effective_width(&panel), TABBAR_H + STATUS_BAR_H,
+                          shape_pane_right_margin);
         }
 
         /* ---- Tab-specific updates (non-World) ---- */
@@ -380,7 +514,23 @@ int main(void) {
         if (cur_tab == TAB_OBJECTS)
             objects_tab_update(&objects_tab, vw, vh);
         if (cur_tab == TAB_SETTINGS) {
+            /* Mirror the live World's shape state into the checkbox
+               before drawing/handling it, so toggling SHAPE mode from
+               the World panel (editor.c) and toggling it here always
+               agree -- whichever one last changed it wins, and the
+               checkbox never lies about what's actually active. */
+            editor_settings.world_shape_active = world.shape.active;
+            bool shape_was_active = world.shape.active;
+
             settings_tab_update(&settings_tab, &project, vw, vh);
+
+            if (editor_settings.world_shape_active && !shape_was_active) {
+                world_shape_activate(&world.shape, world.width, world.height);
+                LOG_INFO("World shape activated (settings) -- all tiles enabled, cut holes from SHAPE mode");
+            } else if (!editor_settings.world_shape_active && shape_was_active) {
+                world_shape_destroy(&world.shape);
+                LOG_INFO("World shape deactivated -- map is a full rectangle again");
+            }
             /* Handle resize requests from settings tab */
             if (settings_tab.wants_resize) {
                 if (world_resize(&world, settings_tab.pending_grid_w,
@@ -411,6 +561,7 @@ int main(void) {
                 registry_save(&registry, ENTITY_SAVE_PATH);
                 simulation_save(&sim_clock, &resources, SIM_SAVE_PATH);
                 weather_save(&weather, WEATHER_SAVE_PATH);
+                editor_settings_save(&editor_settings);
                 LOG_INFO("Project '%s' closed -> back to Project Manager", project.name);
                 project_manager_init(&pm);
                 screen = SCREEN_PROJECT_MANAGER;
@@ -424,8 +575,9 @@ int main(void) {
 
         if (cur_tab == TAB_WORLD) {
             renderer_begin(&camera);
-            world_render(&world);
+            world_render(&world, &atlas);
             if (mode == MODE_EDIT) editor_render(&editor, &registry);
+            system_animate_entities(&registry, dge_time_delta());
             system_render_entities(&registry, &atlas, &assets);
             weather_render(&weather, &camera);
             construction_render(&registry, &camera);
@@ -437,17 +589,20 @@ int main(void) {
         tabbar_render(&tabbar, vw, mode == MODE_PLAY);
 
         if (cur_tab == TAB_WORLD && mode == MODE_EDIT) {
-            ui_render(&resources, &sim_clock, &weather, &editor, &registry,
-                      vw, vh, world.width, world.height,
+            ui_render(&resources, &sim_clock, &weather, &editor, &registry, &world,
+                      project.genre, vw, vh, world.width, world.height,
                       panel_effective_width(&panel) + 10);
-            panel_render(&panel, &editor, &resources, &weather, &obj_registry, vw, vh);
+            panel_render(&panel, &editor, &resources, &weather, &obj_registry,
+                         &atlas, &sprites_tab, &world, project.genre, vw, vh);
             minimap_render(&world, &registry, &camera, vw, vh);
+            if (editor.mode == EDITOR_MODE_SHAPE)
+                shape_pane_render(&shape_pane, &world, vw, vh);
         } else if (cur_tab == TAB_WORLD && mode == MODE_PLAY) {
             /* No sidebar to offset against -- the status row gets the
                full width back, same reasoning as panel_effective_width()
                returning 0 when the sidebar is hidden in Edit mode. */
-            ui_render(&resources, &sim_clock, &weather, &editor, &registry,
-                      vw, vh, world.width, world.height, 10);
+            ui_render(&resources, &sim_clock, &weather, &editor, &registry, &world,
+                      project.genre, vw, vh, world.width, world.height, 10);
             minimap_render(&world, &registry, &camera, vw, vh);
 
             const char *hint = "PLAYING -- click STOP (top right) to return to editing";
@@ -465,6 +620,8 @@ int main(void) {
     }
 
     /* Shutdown */
+    editor_settings_save(&editor_settings);
+    lua_host_destroy(lua);
     if (mode == MODE_PLAY) playmode_snapshot_free(&play_snap);
     if (editor_ready) {
         world_destroy(&world);

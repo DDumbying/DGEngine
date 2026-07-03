@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include "camera.h"
+#include "atlas.h"
 #include "../math/vec2.h"
 
 /*  Immediate-mode 2-D renderer.
@@ -46,6 +47,13 @@ void renderer_set_tile_size(float tile_w, float tile_h);
 void renderer_get_tile_size(float *out_w, float *out_h);
 void renderer_draw_iso_tile(int gx, int gy,
                             float r, float g, float b, float a);
+
+/* Textured variant — same diamond geometry, UV-mapped from the currently
+   bound texture. Call renderer_bind_texture() before a batch of these
+   and renderer_flush_texture() after. */
+void renderer_draw_iso_tile_uv(int gx, int gy,
+                               float r, float g, float b, float a,
+                               UVRect uv);
 void renderer_draw_iso_grid(int cols, int rows);
 
 /*  Converts grid-tile coordinates to the same world-space (cx, cy) that

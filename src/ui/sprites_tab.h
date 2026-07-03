@@ -1,104 +1,78 @@
 #ifndef DGE_SPRITES_TAB_H
 #define DGE_SPRITES_TAB_H
 
-/*  Phase K — Sprite Manager tab.
-
-    Displays the loaded sprite atlas as a clickable grid of cells.
-    Clicking a cell selects it; the inspector on the right lets you
-    type a name for that cell.  Names are saved to assets/sprites.meta
-    (plain text, one "index=name" per line) and loaded back on open.
-
-    The Object Editor (Phase L) references sprites by name, not index,
-    so renaming sprites here won't break object definitions as long as
-    the meta file stays in sync.
+/*  Sprite Manager tab.
 
     Layout (within the content area below TABBAR_H):
-      LEFT  — atlas grid (scrollable if large)
-      RIGHT — inspector: index, pixel size, name TextInput, Load/Reload btns
+      LEFT  — Two sections:
+               1. "YOUR SPRITES" — imported assets (always visible, always on top)
+               2. "ATLAS SPRITES (PLACEHOLDER)" — collapsible atlas grid
+      RIGHT — Inspector: selected info, name field, import section
 
-    sprites_tab_load_meta() / sprites_tab_save_meta() handle the .meta
-    file; sprites_tab_get_name() lets the Object Editor look up names. */
+    The separation is intentional: imported assets are the primary workflow
+    (user's own art); the placeholder atlas is a fallback during development. */
 
 #include <stdbool.h>
 #include "../renderer/atlas.h"
 #include "../renderer/asset_library.h"
 #include "textinput.h"
 
-#define SPRITES_META_MAX 256          /* max named sprite slots */
+#define SPRITES_META_MAX 256
 #define SPRITE_NAME_MAX   64
 
-/*  One named entry in sprites.meta. */
 typedef struct {
     int  id;
     char name[SPRITE_NAME_MAX];
 } SpriteName;
 
 typedef struct {
-    /* Current atlas reference (not owned — owned by main.c) */
+    /* Atlas reference (not owned) */
     SpriteAtlas *atlas;
 
-    /* Asset import overhaul: a second, ungridded sprite source --
-       see renderer/asset_library.h for why this is a separate table
-       instead of folded into the atlas grid. Also not owned. */
+    /* Imported asset library (not owned) */
     AssetLibrary *assets;
 
-    /* Selected cell */
-    int selected_id;        /* -1 = nothing selected */
+    /* Selected cell — can be atlas index (0..N-1) or ASSET_ID_BASE+i for imported */
+    int selected_id;
 
     /* Name editing */
     TextInput name_field;
     bool      name_focused;
 
-    /* Name table — parallel to atlas sprite indices */
+    /* Name table for atlas cells */
     SpriteName names[SPRITES_META_MAX];
-    int        name_count;   /* valid entries in names[] */
+    int        name_count;
 
-    /* Grid scroll — vertical offset in cells */
+    /* Grid scroll for atlas section */
     int scroll_cells;
 
-    /* Path field for "Load atlas" */
+    /* Imported assets scroll (separate list) */
+    int import_scroll;
+
+    /* Atlas section collapsed/expanded */
+    bool show_atlas_section;
+
+    /* Path fields */
     TextInput load_path;
     bool      load_path_focused;
 
-    /* Import section: path to import + name to register it under.
-       Two separate fields since "where the file is" and "what you
-       want to call it" are different questions -- defaulting the name
-       field from the path's basename (see sprites_tab.c) covers the
-       common case without forcing it. */
     TextInput import_path;
     bool      import_path_focused;
     TextInput import_name;
     bool      import_name_focused;
 
-    /* Imported-assets list scroll, separate from the grid's scroll_cells
-       since they're two independent lists in two different areas. */
-    int import_scroll;
-
-    /* One-line status/error message */
+    /* Status/error message */
     char status[128];
 } SpritesTab;
 
 void sprites_tab_init(SpritesTab *st, SpriteAtlas *atlas, AssetLibrary *assets);
 
-/*  Load  assets/sprites.meta (relative to cwd = project folder).
-    Safe to call even if the file doesn't exist yet. */
 void sprites_tab_load_meta(SpritesTab *st);
-
-/*  Write assets/sprites.meta.  Called on name change + on Save. */
 void sprites_tab_save_meta(const SpritesTab *st);
 
-/*  Look up a sprite name by id.  Returns "" if not named. */
 const char *sprites_tab_get_name(const SpritesTab *st, int id);
-
-/*  Look up a sprite id by name. Checks the AssetLibrary first (an
-    imported standalone image), then the atlas grid's named cells --
-    returns -1 if neither has this name. This is the one function
-    ObjectDef's `sprite` property resolution actually calls, so this
-    is the one place that needs to know both sprite sources exist;
-    everything past this point is just an int again. */
 int sprites_tab_find_id(const SpritesTab *st, const char *name);
 
-/*  Per-frame update and render.  vw/vh are full viewport dimensions. */
 void sprites_tab_update(SpritesTab *st, int vw, int vh);
 void sprites_tab_render(const SpritesTab *st, int vw, int vh);
 

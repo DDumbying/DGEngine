@@ -95,7 +95,7 @@ DefinitionComponent *entity_get_definition(Registry *r, Entity e);
     Format (little-endian, fields written individually, same reasoning
     as world.c's save format):
       char     magic[4] = "DGEE"
-      uint32   version  = 7
+      uint32   version  = 8
       uint32   count    (number of alive entities)
       then count records, each:
         uint8  component_mask   (bit0=Transform bit1=Renderable bit2=Health
@@ -109,11 +109,21 @@ DefinitionComponent *entity_get_definition(Registry *r, Entity e);
         [ResourceComponent]     if bit3 set  (ResourceKind as uint8, yield_per_hit as int32)
         [MoveComponent speed]   if bit4 set  (float speed only — lerp state resets on load)
         [TaskComponent kind+tgt]if bit5 set  (TaskKind as uint8, target_x/y as int32; path recomputed)
-        [ConstructionComponent] if bit6 set  (BuildingKind as uint8, build_time_total
-                                  and build_time_done as float, complete as uint8,
-                                  then -- versions <7 stop here, is_custom defaults
-                                  false -- is_custom as uint8, def_name as a fixed
-                                  OBJDEF_NAME_MAX-byte block, NUL-padded)
+        [ConstructionComponent] if bit6 set  (build_time_total and build_time_done
+                                  as float, complete as uint8, then def_name as a
+                                  fixed OBJDEF_NAME_MAX-byte block, NUL-padded —
+                                  every blueprint is ObjectDef-driven now, Phase 2
+                                  retired the old BuildingKind-as-uint8 leading byte
+                                  and the is_custom flag alongside it. Versions <8
+                                  wrote that leading BuildingKind byte (always 0,
+                                  the only entry that type ever had) before the
+                                  float fields; versions 7 additionally had
+                                  is_custom+def_name after complete; versions <7
+                                  had no def_name at all. Loading any of these
+                                  migrates to a synthesized def_name of "Campfire"
+                                  wherever the old format implied
+                                  BUILDING_CAMPFIRE — see registry.c's load path
+                                  for the exact per-version branching.)
         [DefinitionComponent]   if bit7 set  (def_name as a fixed
                                   OBJDEF_NAME_MAX-byte block, NUL-padded)
 

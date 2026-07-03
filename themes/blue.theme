@@ -1,0 +1,10 @@
+name=Ocean (Blue)
+accent=0.22 0.55 0.90
+bg=0.07 0.08 0.11
+panel_bg=0.08 0.09 0.12
+border=0.18 0.22 0.28
+border_active=0.28 0.65 0.95
+text=0.90 0.92 0.95
+text_dim=0.50 0.54 0.58
+warn=0.90 0.70 0.20
+error=0.90 0.30 0.30

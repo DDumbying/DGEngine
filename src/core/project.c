@@ -28,6 +28,30 @@ void project_defaults(Project *p) {
     p->grid_h = 64;
     p->tile_w = 64;
     p->tile_h = 32;
+    p->topology = WORLD_TOPO_RECT;
+    p->genre    = GENRE_SANDBOX_SIM;
+}
+
+const char *genre_profile_name(GenreProfile g) {
+    switch (g) {
+        case GENRE_SANDBOX_SIM: return "Sandbox Sim";
+        case GENRE_TACTICS:     return "Tactics";
+        case GENRE_FREEFORM:    return "Freeform";
+        default:                return "?";
+    }
+}
+
+const char *genre_profile_desc(GenreProfile g) {
+    switch (g) {
+        case GENRE_SANDBOX_SIM:
+            return "Resources, weather, harvest/build AI -- today's loop";
+        case GENRE_TACTICS:
+            return "Turn-based, no resources/weather, script-driven units";
+        case GENRE_FREEFORM:
+            return "Blank slate -- world + entities only, scripts run everything";
+        default:
+            return "";
+    }
 }
 
 bool project_folder_valid(const char *folder) {
@@ -55,6 +79,8 @@ bool project_save(const Project *p) {
     fprintf(f, "grid_h=%d\n", p->grid_h);
     fprintf(f, "tile_w=%d\n", p->tile_w);
     fprintf(f, "tile_h=%d\n", p->tile_h);
+    fprintf(f, "topology=%d\n", (int)p->topology);
+    fprintf(f, "genre=%d\n", (int)p->genre);
     fclose(f);
     LOG_INFO("project_save: wrote '%s'", path);
     return true;
@@ -92,11 +118,32 @@ bool project_load(Project *p, const char *folder) {
         const char *key = line;
         const char *val = eq + 1;
 
-        if (strcmp(key, "name")   == 0) strncpy(p->name, val, PROJECT_NAME_MAX - 1);
+        if (strcmp(key, "name")   == 0) {
+            snprintf(p->name, PROJECT_NAME_MAX, "%.*s", PROJECT_NAME_MAX - 1, val);
+        }
         else if (strcmp(key, "grid_w") == 0) p->grid_w = atoi(val);
         else if (strcmp(key, "grid_h") == 0) p->grid_h = atoi(val);
         else if (strcmp(key, "tile_w") == 0) p->tile_w = atoi(val);
         else if (strcmp(key, "tile_h") == 0) p->tile_h = atoi(val);
+        else if (strcmp(key, "topology") == 0) {
+            int t = atoi(val);
+            /* Old project.dge files (saved before this field existed)
+               have no "topology=" line at all, so project_defaults()'s
+               WORLD_TOPO_RECT above is already the right fallback --
+               this branch only guards against a corrupt/out-of-range
+               value actually present in the file. */
+            p->topology = (t >= 0 && t < WORLD_TOPO_COUNT) ? (WorldTopology)t : WORLD_TOPO_RECT;
+        }
+        else if (strcmp(key, "genre") == 0) {
+            int g = atoi(val);
+            /* Same backward-compat reasoning as topology above: old
+               project.dge files have no "genre=" line, so the
+               GENRE_SANDBOX_SIM set by project_defaults() above is
+               already the right fallback — preserving exactly today's
+               behavior for every project that exists before this field
+               was added. */
+            p->genre = (g >= 0 && g < GENRE_COUNT) ? (GenreProfile)g : GENRE_SANDBOX_SIM;
+        }
     }
     fclose(f);
 
@@ -189,8 +236,7 @@ void project_recent_remove(const char *folder) {
     char new_paths[PROJECT_RECENT_MAX][PROJECT_PATH_MAX];
     for (int i = 0; i < count; i++) {
         if (strcmp(paths[i], folder) != 0) {
-            strncpy(new_paths[out++], paths[i], PROJECT_PATH_MAX - 1);
-            new_paths[out - 1][PROJECT_PATH_MAX - 1] = '\0';
+            snprintf(new_paths[out++], PROJECT_PATH_MAX, "%.*s", PROJECT_PATH_MAX - 1, paths[i]);
         }
     }
     FILE *f = fopen(recent_path(), "w");

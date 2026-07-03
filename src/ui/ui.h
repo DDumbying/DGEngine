@@ -5,6 +5,8 @@
 #include "../simulation/weather.h"
 #include "../editor/editor.h"
 #include "../ecs/registry.h"
+#include "../core/project.h"
+#include "../world/world.h"
 
 /* Height of ui_render()'s own status row, directly below the tab bar
    (see ui.c) — exposed so main.c can fold it into the same top-margin
@@ -16,6 +18,13 @@
     weather, editor mode, and a control-hint line. This is the one
     place that decides *what* the HUD shows; text.c only knows how to
     draw characters, it has no idea what a ResourceStore is.
+
+    genre gates the resource/weather/clock readouts — those only mean
+    something for GENRE_SANDBOX_SIM, where the engine is actually
+    ticking SimClock/WeatherSystem/ResourceStore (see main.c). Showing
+    "W:0 S:0" for a tactics game that never touches ResourceStore would
+    just be a permanently-zero number with no meaning, so TACTICS and
+    FREEFORM get a HUD that only shows mode + tile coord instead.
 
     hud_x_origin is where the HUD starts horizontally — pass
     panel_effective_width() (see ui/panel.h) plus a small margin so the
@@ -29,6 +38,8 @@ void ui_render(const ResourceStore *resources,
                const WeatherSystem *weather,
                const Editor *editor,
                const Registry *registry,
+               const World *world,
+               GenreProfile genre,
                int viewport_w, int viewport_h,
                int world_w, int world_h,
                int hud_x_origin);

@@ -222,6 +222,8 @@ static bool do_create(ProjectManager *pm, Project *out) {
     strncpy(out->name, name, PROJECT_NAME_MAX - 1);
     strncpy(out->path, path, PROJECT_PATH_MAX - 1);
     out->grid_w = gw;  out->grid_h = gh;
+    out->topology = pm->new_topology;
+    out->genre    = pm->new_genre;
     project_save(out);
     project_create_dirs(out);
     pm->error_msg[0] = '\0';
@@ -370,7 +372,34 @@ ProjectManagerResult project_manager_update(ProjectManager *pm,
         if (draw_field(L.right_x + fhalf + ITEM_GAP, fy, fhalf, "GRID H",
                        &pm->new_h, pm->focus == PM_FOCUS_NEW_H, mx, my))
             set_focus(pm, PM_FOCUS_NEW_H);
-        fy += field_block_h() + LINE_GAP;
+        fy += field_block_h() + 4.0f;
+
+        /* World topology buttons (click to select) */
+        fy += text_line_height(SCALE_SMALL) + 4.0f;  /* skip label */
+        float topo_btn_w = (fw - ITEM_GAP * 3.0f) / 4.0f;
+        for (int t = 0; t < WORLD_TOPO_COUNT; t++) {
+            float bx = L.right_x + (float)t * (topo_btn_w + ITEM_GAP);
+            if (hittest(bx, fy, topo_btn_w, BTN_H, mx, my) &&
+                input_mouse_button_pressed(SDL_BUTTON_LEFT))
+                pm->new_topology = (WorldTopology)t;
+        }
+        fy += BTN_H + 4.0f;
+        fy += text_line_height(SCALE_SMALL) + LINE_GAP;  /* skip desc */
+
+        /* Genre profile buttons — same pattern as topology above. This
+           is the fork point: it decides which systems even run (see
+           project.h's GenreProfile comment), not just how the world
+           shape is generated. */
+        fy += text_line_height(SCALE_SMALL) + 4.0f;  /* skip label */
+        float genre_btn_w = (fw - ITEM_GAP * 2.0f) / 3.0f;
+        for (int g = 0; g < GENRE_COUNT; g++) {
+            float bx = L.right_x + (float)g * (genre_btn_w + ITEM_GAP);
+            if (hittest(bx, fy, genre_btn_w, BTN_H, mx, my) &&
+                input_mouse_button_pressed(SDL_BUTTON_LEFT))
+                pm->new_genre = (GenreProfile)g;
+        }
+        fy += BTN_H + 4.0f;
+        fy += text_line_height(SCALE_SMALL) + LINE_GAP;  /* skip desc */
 
         /* Textinput update for focused field */
         float name_y  = L.form_y + text_line_height(SCALE_SMALL) + 2.0f;
@@ -643,7 +672,98 @@ void project_manager_render(const ProjectManager *pm, int vw, int vh) {
                    &pm->new_w, pm->focus == PM_FOCUS_NEW_W, mx, my);
         draw_field(L.right_x + fhalf + ITEM_GAP, fy, fhalf, "GRID H",
                    &pm->new_h, pm->focus == PM_FOCUS_NEW_H, mx, my);
-        fy += field_block_h() + LINE_GAP;
+        fy += field_block_h();
+
+        /* FREEFORM still needs grid bounds — they're the maximum canvas
+           the Shape Pane can paint within, not the starting size. Every
+           other topology fills this rect outright, so the distinction
+           only matters to call out for FREEFORM specifically. */
+        if (pm->new_topology == WORLD_TOPO_FREEFORM) {
+            text_draw(L.right_x, fy, SCALE_SMALL, 0.45f, 0.55f, 0.48f, 1.0f,
+                      "MAX CANVAS SIZE -- STARTS BLANK, PAINT TO GROW");
+            fy += text_line_height(SCALE_SMALL) + 2.0f;
+        }
+        fy += 2.0f;
+
+        /* ---- World topology picker ---- */
+        text_draw(L.right_x, fy, SCALE_SMALL, 0.52f, 0.52f, 0.55f, 1.0f,
+                  "WORLD SHAPE");
+        fy += text_line_height(SCALE_SMALL) + 4.0f;
+
+        static const struct { const char *label; const char *desc; } TOPOS[] = {
+            { "RECTANGLE", "FILLS THE ENTIRE GRID"      },
+            { "FREEFORM",  "BLANK CANVAS - PAINT OUTWARD" },
+            { "ISLAND",    "AUTO WATER BORDER"           },
+            { "ROOMS",     "DUNGEON ROOM GRID"           },
+        };
+        float topo_btn_w = (fw - ITEM_GAP * 3.0f) / 4.0f;
+        for (int t = 0; t < WORLD_TOPO_COUNT; t++) {
+            float bx = L.right_x + (float)t * (topo_btn_w + ITEM_GAP);
+            bool  active = (pm->new_topology == (WorldTopology)t);
+            bool  bhov   = hittest(bx, fy, topo_btn_w, BTN_H, mx, my);
+            float bfr = active ? 0.16f : (bhov ? 0.14f : 0.09f);
+            float bfg = active ? 0.52f : (bhov ? 0.28f : 0.14f);
+            float bfb = active ? 0.28f : (bhov ? 0.16f : 0.09f);
+            draw_box(bx, fy, topo_btn_w, BTN_H, bfr, bfg, bfb,
+                     active ? 0.32f : 0.22f,
+                     active ? 0.78f : 0.28f,
+                     active ? 0.42f : 0.22f);
+            float lw2 = text_measure_width(TOPOS[t].label, SCALE_SMALL);
+            float lh2 = text_line_height(SCALE_SMALL);
+            text_draw(bx + (topo_btn_w - lw2) * 0.5f,
+                      fy  + (BTN_H - lh2) * 0.5f,
+                      SCALE_SMALL,
+                      active ? 1.0f : 0.55f,
+                      active ? 1.0f : 0.55f,
+                      active ? 1.0f : 0.55f, 1.0f, TOPOS[t].label);
+        }
+        fy += BTN_H + 4.0f;
+
+        /* Description of selected topology */
+        if (pm->new_topology < WORLD_TOPO_COUNT) {
+            text_draw(L.right_x, fy, SCALE_SMALL,
+                      0.36f, 0.75f, 0.48f, 1.0f,
+                      TOPOS[pm->new_topology].desc);
+        }
+        fy += text_line_height(SCALE_SMALL) + LINE_GAP;
+
+        /* ---- Genre profile picker ----
+           Same visual treatment as World Shape above, deliberately —
+           it's the same kind of decision (a creation-time fork that
+           shapes what the rest of the editor does), it just decides
+           which *systems* run instead of how the world is laid out. */
+        text_draw(L.right_x, fy, SCALE_SMALL, 0.52f, 0.52f, 0.55f, 1.0f,
+                  "GAME TYPE");
+        fy += text_line_height(SCALE_SMALL) + 4.0f;
+
+        float genre_btn_w = (fw - ITEM_GAP * 2.0f) / 3.0f;
+        for (int g = 0; g < GENRE_COUNT; g++) {
+            float bx = L.right_x + (float)g * (genre_btn_w + ITEM_GAP);
+            bool  active = (pm->new_genre == (GenreProfile)g);
+            bool  bhov   = hittest(bx, fy, genre_btn_w, BTN_H, mx, my);
+            float bfr = active ? 0.16f : (bhov ? 0.14f : 0.09f);
+            float bfg = active ? 0.52f : (bhov ? 0.28f : 0.14f);
+            float bfb = active ? 0.28f : (bhov ? 0.16f : 0.09f);
+            draw_box(bx, fy, genre_btn_w, BTN_H, bfr, bfg, bfb,
+                     active ? 0.32f : 0.22f,
+                     active ? 0.78f : 0.28f,
+                     active ? 0.42f : 0.22f);
+            const char *label = genre_profile_name((GenreProfile)g);
+            float lw3 = text_measure_width(label, SCALE_SMALL);
+            float lh3 = text_line_height(SCALE_SMALL);
+            text_draw(bx + (genre_btn_w - lw3) * 0.5f,
+                      fy  + (BTN_H - lh3) * 0.5f,
+                      SCALE_SMALL,
+                      active ? 1.0f : 0.55f,
+                      active ? 1.0f : 0.55f,
+                      active ? 1.0f : 0.55f, 1.0f, label);
+        }
+        fy += BTN_H + 4.0f;
+
+        text_draw(L.right_x, fy, SCALE_SMALL,
+                  0.36f, 0.75f, 0.48f, 1.0f,
+                  genre_profile_desc(pm->new_genre));
+        fy += text_line_height(SCALE_SMALL) + LINE_GAP;
 
         draw_button(L.right_x, fy, 130.0f, BTN_H, "CREATE", true, mx, my);
 
@@ -655,16 +775,61 @@ void project_manager_render(const ProjectManager *pm, int vw, int vh) {
         draw_button(L.right_x, fy, 110.0f, BTN_H, "OPEN", true, mx, my);
     }
 
-    /* ---- Bottom strip: hint + error — stacked, always visible --- */
+    /* ---- Bottom strip: separator + key hints + error message ---- */
     {
-        float hint_y = (float)vh - L.pad - text_line_height(SCALE_HINT);
-        const char *hint = "TAB NEXT FIELD   ENTER CONFIRM   ESC CANCEL";
-        float hw = text_measure_width(hint, SCALE_HINT);
-        text_draw(((float)vw - hw) * 0.5f, hint_y,
-                  SCALE_HINT, 0.32f, 0.32f, 0.36f, 1.0f, hint);
+        float strip_h = text_line_height(SCALE_SMALL) + L.pad * 1.5f;
+        float strip_y = (float)vh - strip_h;
 
+        /* Subtle background band */
+        renderer_draw_quad(0.0f, strip_y, (float)vw, strip_h,
+                           0.06f, 0.06f, 0.07f, 1.0f);
+        /* Top border line */
+        renderer_draw_quad(0.0f, strip_y, (float)vw, 1.0f,
+                           0.22f, 0.22f, 0.28f, 1.0f);
+
+        /* Three key hints, evenly spaced */
+        struct { const char *key; const char *action; } hints[] = {
+            { "TAB",   "NEXT FIELD"  },
+            { "ENTER", "CONFIRM"     },
+            { "ESC",   "CANCEL"      },
+        };
+        int n = (int)(sizeof hints / sizeof hints[0]);
+        float ty = strip_y + (strip_h - text_line_height(SCALE_SMALL)) * 0.5f;
+        float slot_w = (float)vw / (float)n;
+
+        for (int i = 0; i < n; i++) {
+            float kw = text_measure_width(hints[i].key,    SCALE_SMALL);
+            float aw = text_measure_width(hints[i].action, SCALE_SMALL);
+            float gap = 6.0f;
+            float total_w = kw + gap + aw;
+            float hx = (float)i * slot_w + (slot_w - total_w) * 0.5f;
+
+            /* Key badge */
+            float badge_pad = 4.0f;
+            float badge_w = kw + badge_pad * 2.0f;
+            float badge_h = text_line_height(SCALE_SMALL) + 2.0f;
+            float badge_y = ty - 1.0f;
+            renderer_draw_quad(hx, badge_y, badge_w, badge_h,
+                               0.16f, 0.18f, 0.20f, 1.0f);
+            renderer_draw_quad(hx, badge_y, badge_w, 1.0f,
+                               0.30f, 0.30f, 0.36f, 1.0f);
+            renderer_draw_quad(hx, badge_y + badge_h - 1.0f, badge_w, 1.0f,
+                               0.14f, 0.14f, 0.18f, 1.0f);
+            renderer_draw_quad(hx, badge_y, 1.0f, badge_h,
+                               0.30f, 0.30f, 0.36f, 1.0f);
+            renderer_draw_quad(hx + badge_w - 1.0f, badge_y, 1.0f, badge_h,
+                               0.30f, 0.30f, 0.36f, 1.0f);
+            text_draw(hx + badge_pad, ty, SCALE_SMALL,
+                      0.80f, 0.85f, 0.90f, 1.0f, hints[i].key);
+
+            /* Action label */
+            text_draw(hx + badge_w + gap, ty, SCALE_SMALL,
+                      0.38f, 0.38f, 0.42f, 1.0f, hints[i].action);
+        }
+
+        /* Error message (above the strip) */
         if (pm->error_msg[0]) {
-            float err_y = hint_y - text_line_height(SCALE_BODY) - 4.0f;
+            float err_y = strip_y - text_line_height(SCALE_BODY) - 6.0f;
             float ew = text_measure_width(pm->error_msg, SCALE_BODY);
             text_draw(((float)vw - ew) * 0.5f, err_y,
                       SCALE_BODY, 1.0f, 0.32f, 0.28f, 1.0f, pm->error_msg);

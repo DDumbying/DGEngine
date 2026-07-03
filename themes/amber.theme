@@ -1,0 +1,10 @@
+name=Foundry (Amber)
+accent=0.90 0.55 0.14
+bg=0.10 0.08 0.06
+panel_bg=0.11 0.09 0.07
+border=0.28 0.22 0.16
+border_active=0.95 0.65 0.20
+text=0.95 0.90 0.85
+text_dim=0.58 0.52 0.46
+warn=0.90 0.70 0.20
+error=0.90 0.30 0.30

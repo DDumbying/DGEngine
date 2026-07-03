@@ -7,7 +7,8 @@
 #include <math.h>
 
 void system_update_agents(Registry *reg, const World *world, SpatialGrid *sgrid,
-                          ResourceStore *resources, float gdt, float speed_multiplier) {
+                          ResourceStore *resources, float gdt, float speed_multiplier,
+                          AgentEventCB event_cb, void *event_userdata) {
     for (Entity e = 0; e < (Entity)MAX_ENTITIES; e++) {
         if (!reg->alive[e] || !reg->has_transform[e] || !reg->has_move[e] || !reg->has_task[e])
             continue;
@@ -57,6 +58,7 @@ void system_update_agents(Registry *reg, const World *world, SpatialGrid *sgrid,
                     EntityHandle res_h = entity_to_handle(reg, res_entity);
                     bool destroyed = system_harvest_entity(reg, res_h, resources);
                     if (destroyed) {
+                        if (event_cb) event_cb(res_entity, "on_death", event_userdata);
                         sgrid_remove(sgrid, tsk->target_x, tsk->target_y);
                         tsk->kind = TASK_IDLE;
                     }
@@ -78,7 +80,8 @@ void system_update_agents(Registry *reg, const World *world, SpatialGrid *sgrid,
             if (blueprint != ENTITY_NULL && reg->has_construction[blueprint]
                 && !reg->construction[blueprint].complete) {
                 if (system_build_entity(reg, blueprint, gdt)) {
-                    tsk->kind = TASK_IDLE;
+                        if (event_cb) event_cb(blueprint, "on_build", event_userdata);
+                        tsk->kind = TASK_IDLE;
                 }
             } else {
                 LOG_INFO("Agent %u: build target at (%d, %d) missing/already complete", e, tsk->target_x, tsk->target_y);
@@ -125,7 +128,7 @@ void system_update_agents(Registry *reg, const World *world, SpatialGrid *sgrid,
             int ny = tsk->path.y[tsk->path_step];
 
             const Tile *tile = world_get_tile(world, nx, ny);
-            if (tile && tile_is_walkable(tile->type)) {
+            if (tile && world_tile_walkable(world, tile)) {
                 m->moving = true;
                 m->src_x = cx;
                 m->src_y = cy;

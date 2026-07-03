@@ -49,16 +49,22 @@ typedef enum {
     PM_FOCUS_OPEN_PATH,
 } PMFocus;
 
+/*  World topology is defined in core/project.h (WORLD_TOPO_*) — it's
+    persisted project metadata, not just New-Project-form state, so it
+    lives with Project rather than being duplicated here. */
+
 typedef struct {
     /* Right-panel tab */
     PMTab   tab;
     PMFocus focus;
 
     /* NEW PROJECT form fields */
-    TextInput new_name;
-    TextInput new_path;
-    TextInput new_w;
-    TextInput new_h;
+    TextInput    new_name;
+    TextInput    new_path;
+    TextInput    new_w;
+    TextInput    new_h;
+    WorldTopology new_topology;   /* chosen at creation time */
+    GenreProfile  new_genre;      /* chosen at creation time */
 
     /* OPEN PROJECT form field */
     TextInput open_path;

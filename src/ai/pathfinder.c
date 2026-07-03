@@ -51,7 +51,7 @@ bool pathfinder_find(const World *world,
 
     /* Goal must be walkable */
     const Tile *goal_tile = world_get_tile(world, gx, gy);
-    if (!goal_tile || !tile_is_walkable(goal_tile->type)) return false;
+    if (!goal_tile || !world_tile_walkable(world, goal_tile)) return false;
 
     int n = w * h;
     if (n > MAX_TILES) return false;   /* safety guard */
@@ -138,7 +138,7 @@ bool pathfinder_find(const World *world,
             if (closed[nidx]) continue;
 
             const Tile *nt = world_get_tile(world, nx, ny);
-            if (!nt || !tile_is_walkable(nt->type)) continue;
+            if (!nt || !world_tile_walkable(world, nt)) continue;
 
             int tentative_g = g_cost[cur_idx] + 1;   /* uniform cost = 1 */
             if (tentative_g < g_cost[nidx]) {

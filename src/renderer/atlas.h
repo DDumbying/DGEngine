@@ -6,16 +6,21 @@
     cell_h). Lookup is by SpriteId (an integer index into the grid),
     returning a UVRect the renderer uses to sample the right region.
 
-    Phase E ships with a programmatic fallback atlas (atlas_create_fallback)
+    Ships with a programmatic fallback atlas (atlas_create_fallback)
     so the system works without any image files on disk. When real art
     exists, atlas_load() replaces it transparently — callers only hold
     SpriteIds and never touch raw UVs directly.
 
-    Grid layout (left-to-right, top-to-bottom):
+    Grid layout (left-to-right, top-to-bottom) of the fallback atlas:
       0: TREE    1: ROCK    2: WORKER
       3: CAMPFIRE_BLUEPRINT   4: CAMPFIRE_COMPLETE
       5: TILE_GRASS (overlay not needed but reserved)
-    More slots added as Phase F's data-driven objects land.           */
+    These five names are just the fallback atlas's own slot labels now
+    — see the SPRITE_TREE etc. enum below — not a claim that the
+    engine treats slot 0 as meaning "tree". A project's own ObjectDefs
+    reference whichever slot their sprite actually lives in; nothing
+    in the engine special-cases these five indices anymore (see the
+    note further down on sprite_id_for_prefab()'s retirement). */
 
 #include <stdbool.h>
 #include "texture.h"
@@ -24,10 +29,11 @@
 
 typedef int SpriteId;
 
-/* Named sprite ids — gives callers a stable name instead of a magic int.
-   Kept here (not in prefabs.h) because the atlas is renderer-layer;
-   game-layer code that already has a PrefabKind/BuildingKind goes
-   through sprite_id_for_prefab() / sprite_id_for_building() below.  */
+/* Named sprite ids for the fallback atlas's own five slots — a stable
+   name for those five specific indices, nothing more. Not read by any
+   engine-layer logic; a project referencing its own imported
+   spritesheet has its own slot numbering entirely and never touches
+   this enum. */
 typedef enum {
     SPRITE_TREE               = 0,
     SPRITE_ROCK               = 1,
@@ -67,11 +73,18 @@ void atlas_destroy(SpriteAtlas *a);
    rect if the id is out of range (safe degradation, not a crash).    */
 UVRect atlas_get_uv(const SpriteAtlas *a, SpriteId id);
 
-/* Convenience: translate game-layer kinds to sprite ids.
-   Returns SPRITE_NONE if no sprite is registered for that kind.     */
-#include "../game/prefabs.h"
-#include "../simulation/construction.h"
-SpriteId sprite_id_for_prefab(PrefabKind k);
-SpriteId sprite_id_for_building(BuildingKind k, bool complete);
+/* Phase 2 (ObjectDef consolidation): sprite_id_for_prefab()/
+   sprite_id_for_building() are retired along with PrefabKind/
+   BuildingKind. Their retirement also fixes a real layering violation
+   this file had: renderer/atlas.h — a renderer-layer header — used to
+   #include game/prefabs.h and simulation/construction.h just to spell
+   out those two functions' parameter types, meaning the renderer
+   reached UP into game-layer types. An engine layer should never need
+   to know a game-layer type exists (see ENGINE_DESIGN.md §1's first
+   principle) — a project's own ObjectDef already carries its own
+   sprite reference (ObjectDef.sprite, resolved via
+   sprites_tab_find_id()), so no atlas-side convenience lookup by game
+   type was ever structurally necessary; these two were dead code
+   (never called outside this file) even before being retired. */
 
 #endif /* DGE_ATLAS_H */

@@ -20,7 +20,12 @@
         task has an empty path but has a target (e.g. after a file load).
 */
 
+/*  Event callback — called when a notable simulation event occurs.
+    Pass NULL to disable scripting (e.g. in tests). */
+typedef void (*AgentEventCB)(Entity e, const char *event, void *userdata);
+
 void system_update_agents(Registry *reg, const World *world, SpatialGrid *sgrid,
-                          ResourceStore *resources, float gdt, float speed_multiplier);
+                          ResourceStore *resources, float gdt, float speed_multiplier,
+                          AgentEventCB event_cb, void *event_userdata);
 
 #endif /* DGE_AGENT_H */

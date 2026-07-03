@@ -115,4 +115,3 @@ But how does the engine react to events? many possibilities here, again. Maybe i
 The more special events the engine handles by itself, the easier it is to use the engine, but in some cases the engine's user might want to override this bahavior (like not quitting when requested, which is a deadly sin by theh way), so you might want to support overriding the default bahavior in your engine.
 
 
-

@@ -36,11 +36,58 @@
 
 #define PROJECT_RECENT_MAX  8   /* most-recently-used list length */
 
+/*  World topology — chosen once at project creation time, applied by
+    world_topology_generate() (world/world_generator.h) the first time
+    a brand-new project is opened (i.e. world.dge doesn't exist yet).
+    Lives here rather than in ui/project_manager.h because it's part
+    of the persisted project metadata, not just New-Project-form UI
+    state -- world/world_generator.c (a non-UI module) needs it too. */
+typedef enum {
+    WORLD_TOPO_RECT     = 0,  /* Filled rectangle (classic, default)    */
+    WORLD_TOPO_FREEFORM = 1,  /* Any shape — tiles individually enabled */
+    WORLD_TOPO_ISLAND   = 2,  /* Auto-generated island (water border)   */
+    WORLD_TOPO_ROOMS    = 3,  /* Dungeon room grid (rooms + corridors)  */
+    WORLD_TOPO_COUNT    = 4,
+} WorldTopology;
+
+/*  GenreProfile — chosen once at project creation, same moment and same
+    spot as WorldTopology above. This is the actual fork point that makes
+    DGEngine build more than one kind of isometric game: everything that
+    used to be unconditional (resource HUD, weather ticking, harvest/build
+    AI tasks, the Weather/Resources panel sections) now checks this first.
+
+    Adding a profile here is the ENGINE-level extension point. Adding a
+    *project* that wants different terrain/resources/buildings than the
+    ones shipped with GENRE_SANDBOX_SIM does NOT touch this enum — that's
+    what terrain.def / resources.def (data files, not C) are for. This
+    enum only decides which *systems* run, not what they're populated
+    with. A tactics game and a sandbox-sim game can both want resources
+    in principle — but TACTICS turning ResourceStore/weather off by
+    default is the right starting assumption for the common case, and a
+    project can still hand-wire its own loop entirely through Lua even
+    inside GENRE_FREEFORM where the engine assumes nothing at all. */
+typedef enum {
+    GENRE_SANDBOX_SIM = 0, /* today's behavior: resources, weather, harvest/build AI.
+                               This stays the default so every existing project keeps
+                               working unchanged after this field is added. */
+    GENRE_TACTICS     = 1, /* turn-based, no resources/weather ticking, no harvest/build
+                               task vocabulary — agent.c falls back to script-only tasks */
+    GENRE_FREEFORM    = 2, /* blank slate: simulation loop stays off entirely, panel
+                               shows only PAINT/PLACE/SELECT/SHAPE, everything else is
+                               built by the project's own Lua scripts */
+    GENRE_COUNT       = 3,
+} GenreProfile;
+
+const char *genre_profile_name(GenreProfile g);
+const char *genre_profile_desc(GenreProfile g);
+
 typedef struct {
     char name[PROJECT_NAME_MAX];   /* display name, also folder name    */
     char path[PROJECT_PATH_MAX];   /* absolute path to the project folder */
     int  grid_w, grid_h;           /* world dimensions in tiles         */
     int  tile_w, tile_h;           /* isometric tile pixel size         */
+    WorldTopology topology;        /* chosen at creation, see above     */
+    GenreProfile  genre;           /* chosen at creation, see above     */
 } Project;
 
 /* ---- project.dge I/O ---------------------------------------------- */

@@ -297,6 +297,32 @@ void renderer_draw_iso_tile(int gx, int gy,
     s_quad_count++;
 }
 
+void renderer_draw_iso_tile_uv(int gx, int gy,
+                               float r, float g, float b, float a,
+                               UVRect uv) {
+    float cx = (float)(gx - gy) * (s_tile_w * 0.5f);
+    float cy = (float)(gx + gy) * (s_tile_h * 0.5f);
+
+    if (s_quad_count >= MAX_QUADS) flush();
+
+    const float GAP_PX = 1.5f;
+    float hw = s_tile_w * 0.5f - GAP_PX;
+    float hh = s_tile_h * 0.5f - GAP_PX * (s_tile_h / s_tile_w);
+
+    /* Compute UV midpoints for diamond mapping:
+       top=centre-top, right=centre-right, bottom=centre-bottom, left=centre-left */
+    float umid = (uv.u0 + uv.u1) * 0.5f;
+    float vmid = (uv.v0 + uv.v1) * 0.5f;
+
+    float *v = s_verts + s_quad_count * VERTS_PER_QUAD * FLOATS_PER_VERT;
+    v[ 0]=cx;    v[ 1]=cy-hh; v[ 2]=r; v[ 3]=g; v[ 4]=b; v[ 5]=a; v[ 6]=umid;  v[ 7]=uv.v0;
+    v[ 8]=cx+hw; v[ 9]=cy;    v[10]=r; v[11]=g; v[12]=b; v[13]=a; v[14]=uv.u1;  v[15]=vmid;
+    v[16]=cx;    v[17]=cy+hh; v[18]=r; v[19]=g; v[20]=b; v[21]=a; v[22]=umid;   v[23]=uv.v1;
+    v[24]=cx-hw; v[25]=cy;    v[26]=r; v[27]=g; v[28]=b; v[29]=a; v[30]=uv.u0;  v[31]=vmid;
+
+    s_quad_count++;
+}
+
 void renderer_draw_iso_grid(int cols, int rows) {
     /* Uniform green -- grid lines come from the GAP_PX inset above */
     const float R = 0.36f, G = 0.56f, B = 0.33f;

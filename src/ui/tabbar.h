@@ -1,31 +1,27 @@
 #ifndef DGE_TABBAR_H
 #define DGE_TABBAR_H
 
-/*  Phase J — Top tab bar.
+/*  Top tab bar.
 
     A fixed-height strip at the top of the editor (y=0, x=0..vw).
     Five tabs: World / Objects / Sprites / Scripts / Settings, plus a
-    fixed-width Play/Stop control reserved on the right edge of the
-    same row (added for the Edit/Play split — see core/playmode.h).
-    Tabs occupy (vw - PLAY_BTN_W) split evenly five ways; the control
-    isn't "tab content" so it living in tabbar.c (which already owns
-    this row's layout) rather than panel.c or its own module keeps
-    "who owns this row" answerable in one place.
+    fixed-width Play control zone at the right edge.
 
-    The tab bar does NOT own any content — it only manages which tab is
-    active, and now also whether Play is on. Each tab's content is drawn
-    by its own module (panel.c, objects_tab.c, sprites_tab.c, scripts_tab.c,
-    settings_tab.c); what Play actually *does* is main.c's job (snapshot/
-    restore via playmode.h, gating Edit-only input) — tabbar.c only
-    reports the click.
+    Play control zone (PLAY_CTRL_W pixels):
+      - When EDITING: shows a single green "PLAY" button.
+      - When PLAYING:  shows a full-width red "STOP PLAY" button.
 
-    Height is TABBAR_H pixels; the content area below starts at y=TABBAR_H.
-    main.c reserves that margin when passing viewport bounds to subsystems. */
+    tabbar.c only reports clicks — main.c / play_mode.h owns state.
+
+    Height is TABBAR_H pixels; content area below starts at y=TABBAR_H. */
 
 #include <stdbool.h>
 
-#define TABBAR_H 34   /* pixels reserved for the tab bar at the top */
-#define PLAY_BTN_W 110 /* pixels reserved for the Play/Stop control */
+#define TABBAR_H      34
+#define PLAY_CTRL_W  120   /* pixels for the play control zone */
+
+/* Legacy alias so existing code that uses PLAY_BTN_W still compiles */
+#define PLAY_BTN_W PLAY_CTRL_W
 
 typedef enum {
     TAB_WORLD    = 0,
@@ -42,17 +38,16 @@ typedef struct {
 
 void tabbar_init(TabBar *tb);
 
-/*  Call once per frame. Returns the new active tab (may be the same as
-    before if no click occurred this frame). vw is the full viewport
-    width. *out_toggle_play is set true if the Play/Stop control was
-    clicked this frame (false otherwise) — main.c reads this and flips
-    its own GameMode; tabbar.c has no opinion on what Play mode means,
-    it just reports the click like it reports a tab click. */
+/*  Call once per frame. Returns the new active tab.
+    *out_toggle_play is set true if the play control was clicked. */
 ActiveTab tabbar_update(TabBar *tb, int vw, bool *out_toggle_play);
 
-/*  Draw the bar. Call between renderer_begin_ui() and renderer_end().
-    playing selects the control's "PLAY"/"STOP" label and color — tabbar.c
-    doesn't store this itself since GameMode lives in main.c, not here. */
+/*  Draw the bar. `playing` selects PLAY vs STOP styling. */
 void tabbar_render(const TabBar *tb, int vw, bool playing);
+
+/*  Draw the play-mode overlay (notification banner + status bar).
+    overlay_timer counts down from 2.0 to 0 (the fade-in duration).
+    Call after tabbar_render when in play mode. */
+void tabbar_render_play_overlay(float overlay_timer, bool paused, int vw, int vh);
 
 #endif /* DGE_TABBAR_H */

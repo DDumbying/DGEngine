@@ -15,11 +15,27 @@ typedef struct {
 
 /* How to draw the entity: a colored box anchored to the bottom of its
    tile, sized in pixels. sprite_id >= 0 selects a sprite from the
-   active SpriteAtlas; -1 means color-box fallback (pre-Phase-E). */
+   active SpriteAtlas; -1 means color-box fallback (pre-Phase-E).
+
+   Animation (optional, atlas-only): when frame_count > 1, sprite_id is
+   the FIRST frame and system_animate_entities() cycles through
+   frame_count consecutive atlas cells (sprite_id, sprite_id+1, ...)
+   at frame_fps frames/sec, writing the active one into frame_index.
+   system_render_entities() then draws sprite_id + frame_index instead
+   of sprite_id directly. Leave frame_count at its zero-init default
+   (or explicitly 1) for a static sprite -- no behavior change for any
+   existing spawn site that doesn't set these fields. Imported asset
+   textures (AssetLibrary, not the shared atlas) are never animated;
+   they're whole standalone images with no neighboring frames to step
+   through. */
 typedef struct {
     float r, g, b, a;
     float w, h;
     int   sprite_id;   /* SpriteId from renderer/atlas.h, or -1 */
+    int   frame_count;  /* 0 or 1 = static; >1 = this many atlas cells in the strip */
+    float frame_fps;    /* playback speed; ignored when frame_count <= 1 */
+    float frame_timer;  /* seconds accumulated toward the next frame   */
+    int   frame_index;  /* 0..frame_count-1, added to sprite_id when drawing */
 } RenderableComponent;
 
 typedef struct {
@@ -93,27 +109,26 @@ typedef struct {
     moment build_time_done reaches build_time_total; the same entity is
     reused throughout (its RenderableComponent gets swapped to the
     finished look on completion, see simulation/construction.c) rather
-    than destroying the blueprint and spawning a replacement. */
-typedef enum {
-    BUILDING_CAMPFIRE = 0,
-    BUILDING_COUNT
-} BuildingKind;
+    than destroying the blueprint and spawning a replacement.
 
+    Phase 2 (ObjectDef consolidation): BuildingKind — the hardcoded
+    single-entry campfire enum — is retired. Every blueprint is now an
+    ObjectDef instance; def_name always names it (see
+    core/object_def.h's objdef_is_buildable()/objdef_get_build_spec()).
+    There is no more is_custom flag because there is no longer a
+    non-custom path to distinguish it from — this also fixes a latent
+    bug the old two-path version had: deleting an in-progress blueprint
+    in editor.c read c->kind unconditionally for the refund amount,
+    which was correct for BuildingKind blueprints but silently wrong
+    for ObjectDef ones (whose kind field was never set, so it read as
+    BUILDING_CAMPFIRE's cost regardless of what the real object cost).
+    A single always-def_name-driven path can't have that bug — the
+    refund logic always resolves the real cost via
+    objdef_get_build_spec(). */
 typedef struct {
-    BuildingKind kind;
     float        build_time_total;
     float        build_time_done;
     bool         complete;
-
-    /*  Construction hookup for user-defined buildable objects (see
-        objdef_is_buildable() in core/object_def.h): is_custom==true
-        means kind is meaningless and def_name names the ObjectDef
-        instead. kind stays a plain BuildingKind (not folded into a
-        tagged union) because every existing BUILDING_CAMPFIRE call
-        site already switches on it directly — adding a third "which
-        union member is active" branch everywhere would touch more
-        code than this one extra bool+string does. */
-    bool         is_custom;
     char         def_name[OBJDEF_NAME_MAX];
 } ConstructionComponent;
 
