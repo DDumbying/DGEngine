@@ -35,8 +35,10 @@
 
     Property -> component mapping (see object_def.c's own comment for
     the full convention): an int property named "health" becomes a
-    HealthComponent; a string property named "drops" set to "wood" or
-    "stone" becomes a ResourceComponent (yield from an int property
+    HealthComponent; a string property named "drops" set to any
+    resource name (Phase 2B retired the old wood/stone-only
+    ResourceKind enum — "wood", "gold", "mana", whatever a project
+    wants) becomes a ResourceComponent (yield from an int property
     named "yield", default 10 if absent). This is what makes "the
     properties you set in the Objects tab actually do something" true
     instead of cosmetic — every other property is still recorded in

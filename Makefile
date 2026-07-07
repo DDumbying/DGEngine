@@ -35,7 +35,7 @@ debug:
 # build and run anywhere — useful in CI or anywhere without a display.
 TEST_DIR = bin/tests
 
-test: $(TEST_DIR)/test_registry $(TEST_DIR)/test_picking $(TEST_DIR)/test_pathfinder $(TEST_DIR)/test_weather $(TEST_DIR)/test_simulation $(TEST_DIR)/test_construction $(TEST_DIR)/test_spatial_grid $(TEST_DIR)/test_world_save $(TEST_DIR)/test_world_generator
+test: $(TEST_DIR)/test_registry $(TEST_DIR)/test_picking $(TEST_DIR)/test_pathfinder $(TEST_DIR)/test_weather $(TEST_DIR)/test_simulation $(TEST_DIR)/test_construction $(TEST_DIR)/test_spatial_grid $(TEST_DIR)/test_world_save $(TEST_DIR)/test_world_generator $(TEST_DIR)/test_level
 	@echo "--- running tests ---"
 	@./$(TEST_DIR)/test_registry
 	@./$(TEST_DIR)/test_picking
@@ -46,6 +46,7 @@ test: $(TEST_DIR)/test_registry $(TEST_DIR)/test_picking $(TEST_DIR)/test_pathfi
 	@./$(TEST_DIR)/test_spatial_grid
 	@./$(TEST_DIR)/test_world_save
 	@./$(TEST_DIR)/test_world_generator
+	@./$(TEST_DIR)/test_level
 
 $(TEST_DIR)/test_registry: tests/test_registry.c src/ecs/registry.c src/core/log.c
 	@mkdir -p $(TEST_DIR)
@@ -80,6 +81,10 @@ $(TEST_DIR)/test_world_save: tests/test_world_save.c src/world/world.c src/core/
 	$(CC) $(CFLAGS_DEBUG) $(INCLUDES) $^ -o $@ -lm
 
 $(TEST_DIR)/test_world_generator: tests/test_world_generator.c src/world/world.c src/world/world_generator.c src/core/log.c
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS_DEBUG) $(INCLUDES) $^ -o $@ -lm
+
+$(TEST_DIR)/test_level: tests/test_level.c src/core/level.c src/core/log.c
 	@mkdir -p $(TEST_DIR)
 	$(CC) $(CFLAGS_DEBUG) $(INCLUDES) $^ -o $@ -lm
 

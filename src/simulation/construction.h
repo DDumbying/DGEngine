@@ -37,10 +37,13 @@
    HUD line, colored green/red by affordability). */
 bool objdef_can_afford_build(const ResourceStore *rs, const ObjectDef *def);
 
-/* Atomically pays def's cost from rs (wood or stone, whichever it
-   costs) via resource_store_try_spend_wood/stone. Returns false (no
-   change) if unaffordable — same "check and commit together" contract
-   as resource_store_try_spend_wood/stone. */
+/* Atomically pays def's cost from rs — whatever resource name its
+   build_cost_kind property names (see core/object_def.h;
+   RESOURCE_NAME_MAX-sized, Phase 2B retired the old fixed wood/stone
+   ResourceKind enum, any name works now) — via
+   resource_store_try_spend(). Returns false (no change) if
+   unaffordable — same "check and commit together" contract as
+   resource_store_try_spend(). */
 bool objdef_try_pay_build_cost(ResourceStore *rs, const ObjectDef *def);
 
 /* Undoes objdef_try_pay_build_cost() — the "registry was full after we

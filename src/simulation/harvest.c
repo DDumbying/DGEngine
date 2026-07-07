@@ -24,28 +24,24 @@ bool system_harvest_entity(Registry *reg, EntityHandle h, ResourceStore *rs) {
     if (damage > health->current) damage = health->current;
     health->current -= damage;
 
-    const char *kind_name = (resource->kind == RESOURCE_WOOD) ? "wood" : "stone";
     LOG_INFO("Harvested entity %u: -%d hp (%d/%d remaining)",
              e, damage, health->current, health->max);
 
     if (health->current <= 0) {
-        /* Entity is fully depleted — credit full yield and remove it. */
-        if (resource->kind == RESOURCE_WOOD)
-            resource_store_add_wood(rs, resource->yield_per_hit);
-        else
-            resource_store_add_stone(rs, resource->yield_per_hit);
-
+        /* Entity is fully depleted — credit full yield and remove it.
+           Phase 2B: resource->kind is a plain name now (any string a
+           project wants), not a 2-value enum — resource_store_add()
+           handles "have I seen this name before" itself, so there's no
+           branch here at all anymore. */
+        resource_store_add(rs, resource->kind, resource->yield_per_hit);
         LOG_INFO("Entity %u depleted — gained %d %s, entity removed",
-                 e, resource->yield_per_hit, kind_name);
+                 e, resource->yield_per_hit, resource->kind);
         entity_destroy(reg, e);
         return true;   /* caller's EntityHandle is now stale */
     }
 
     /* Entity still alive — credit partial yield (the damage done). */
-    if (resource->kind == RESOURCE_WOOD)
-        resource_store_add_wood(rs, damage);
-    else
-        resource_store_add_stone(rs, damage);
+    resource_store_add(rs, resource->kind, damage);
 
     return false;
 }

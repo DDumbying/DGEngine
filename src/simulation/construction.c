@@ -13,27 +13,24 @@
    old BuildingKind-driven versions of these three functions retired. */
 
 bool objdef_can_afford_build(const ResourceStore *rs, const ObjectDef *def) {
-    ResourceKind kind; int amount; float build_time;
-    objdef_get_build_spec(def, &kind, &amount, &build_time);
+    char kind[RESOURCE_NAME_MAX]; int amount; float build_time;
+    objdef_get_build_spec(def, kind, sizeof(kind), &amount, &build_time);
     (void)build_time;
-    return kind == RESOURCE_WOOD ? resource_store_has_wood(rs, amount)
-                                  : resource_store_has_stone(rs, amount);
+    return resource_store_has(rs, kind, amount);
 }
 
 bool objdef_try_pay_build_cost(ResourceStore *rs, const ObjectDef *def) {
-    ResourceKind kind; int amount; float build_time;
-    objdef_get_build_spec(def, &kind, &amount, &build_time);
+    char kind[RESOURCE_NAME_MAX]; int amount; float build_time;
+    objdef_get_build_spec(def, kind, sizeof(kind), &amount, &build_time);
     (void)build_time;
-    return kind == RESOURCE_WOOD ? resource_store_try_spend_wood(rs, amount)
-                                  : resource_store_try_spend_stone(rs, amount);
+    return resource_store_try_spend(rs, kind, amount);
 }
 
 void objdef_refund_build_cost(ResourceStore *rs, const ObjectDef *def) {
-    ResourceKind kind; int amount; float build_time;
-    objdef_get_build_spec(def, &kind, &amount, &build_time);
+    char kind[RESOURCE_NAME_MAX]; int amount; float build_time;
+    objdef_get_build_spec(def, kind, sizeof(kind), &amount, &build_time);
     (void)build_time;
-    if (kind == RESOURCE_WOOD) resource_store_add_wood(rs, amount);
-    else                        resource_store_add_stone(rs, amount);
+    resource_store_add(rs, kind, amount);
 }
 
 /* ---------------------------------------------------------------------
@@ -53,8 +50,8 @@ Entity construction_place_blueprint_objdef(Registry *reg, const ObjectDef *def,
     entity_add_renderable(reg, e, (RenderableComponent){
         0.65f, 0.7f, 1.0f, 0.55f, 24.0f, 32.0f, sprite_id, 1, 0.0f, 0.0f, 0});
 
-    ResourceKind cost_kind; int cost_amount; float build_time;
-    objdef_get_build_spec(def, &cost_kind, &cost_amount, &build_time);
+    char cost_kind[RESOURCE_NAME_MAX]; int cost_amount; float build_time;
+    objdef_get_build_spec(def, cost_kind, sizeof(cost_kind), &cost_amount, &build_time);
     (void)cost_kind; (void)cost_amount; /* already spent by the caller before this */
 
     ConstructionComponent c;

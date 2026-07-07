@@ -66,8 +66,7 @@ static void log_entity_info(Registry *reg, Entity e) {
                       rd->r, rd->g, rd->b, rd->a, rd->w, rd->h);
     if (h)  LOG_INFO("  Health    : %d / %d", h->current, h->max);
     if (rc) LOG_INFO("  Resource  : %s  yield_per_hit=%d",
-                     rc->kind == RESOURCE_WOOD ? "wood" : "stone",
-                     rc->yield_per_hit);
+                     rc->kind, rc->yield_per_hit);
     if (m)  LOG_INFO("  Move      : speed=%.1f progress=%.2f moving=%s (src=%d,%d dst=%d,%d)",
                      m->speed, m->progress, m->moving ? "true" : "false",
                      m->src_x, m->src_y, m->dst_x, m->dst_y);
@@ -217,10 +216,10 @@ void editor_update(Editor *ed, Registry *reg, World *world, const Camera *cam,
                              "in the Objects tab?) — placement cancelled", ed->place_def_name);
                 } else if (objdef_is_buildable(&def)) {
                     if (!objdef_try_pay_build_cost(resources, &def)) {
-                        ResourceKind ck; int cost; float bt;
-                        objdef_get_build_spec(&def, &ck, &cost, &bt);
+                        char ck[RESOURCE_NAME_MAX]; int cost; float bt;
+                        objdef_get_build_spec(&def, ck, sizeof(ck), &cost, &bt);
                         LOG_WARN("Not enough resources to build '%s' (need %d %s)",
-                                 def.name, cost, ck == RESOURCE_WOOD ? "wood" : "stone");
+                                 def.name, cost, ck);
                     } else {
                         Entity e = construction_place_blueprint_objdef(
                             reg, &def, ed->place_sprite_id,
@@ -337,9 +336,9 @@ void editor_update(Editor *ed, Registry *reg, World *world, const Camera *cam,
                             tsk->path.len = 0;
                             tsk->path_step = 0;
                             tsk->timer = 0.0f;
-                            const char *res_type = (reg->resource[hover_ent].kind == RESOURCE_WOOD) ? "wood" : "stone";
                             LOG_INFO("Worker %u assigned to harvest %s at (%d, %d)",
-                                     worker, res_type, ed->hover_gx, ed->hover_gy);
+                                     worker, reg->resource[hover_ent].kind,
+                                     ed->hover_gx, ed->hover_gy);
                         } else if (hover_ent != ENTITY_NULL && reg->has_construction[hover_ent]
                                    && !reg->construction[hover_ent].complete) {
                             TaskComponent *tsk = entity_get_task(reg, worker);

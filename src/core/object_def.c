@@ -242,15 +242,19 @@ bool objdef_is_buildable(const ObjectDef *def) {
     return find_prop(def, "build_time", PROP_FLOAT) != NULL;
 }
 
-void objdef_get_build_spec(const ObjectDef *def, ResourceKind *out_cost_kind,
+void objdef_get_build_spec(const ObjectDef *def, char *out_cost_kind, int out_cost_kind_size,
                             int *out_cost_amount, float *out_build_time) {
     const ObjectProperty *bt = find_prop(def, "build_time", PROP_FLOAT);
     *out_build_time = bt ? bt->value.as_float : 0.0f;
 
     const ObjectProperty *kind_prop = find_prop(def, "build_cost_kind", PROP_STRING);
-    *out_cost_kind = RESOURCE_WOOD; /* default, including when kind_prop names anything else */
-    if (kind_prop && strcmp(kind_prop->value.as_string, "stone") == 0)
-        *out_cost_kind = RESOURCE_STONE;
+    const char *kind_str = (kind_prop && kind_prop->value.as_string[0])
+                          ? kind_prop->value.as_string : "wood";
+    if (out_cost_kind && out_cost_kind_size > 0) {
+        int i = 0;
+        for (; i < out_cost_kind_size - 1 && kind_str[i]; i++) out_cost_kind[i] = kind_str[i];
+        out_cost_kind[i] = '\0';
+    }
 
     const ObjectProperty *amount_prop = find_prop(def, "build_cost_amount", PROP_INT);
     *out_cost_amount = amount_prop ? amount_prop->value.as_int : 0;

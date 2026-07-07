@@ -95,7 +95,7 @@ DefinitionComponent *entity_get_definition(Registry *r, Entity e);
     Format (little-endian, fields written individually, same reasoning
     as world.c's save format):
       char     magic[4] = "DGEE"
-      uint32   version  = 8
+      uint32   version  = 9
       uint32   count    (number of alive entities)
       then count records, each:
         uint8  component_mask   (bit0=Transform bit1=Renderable bit2=Health
@@ -106,7 +106,12 @@ DefinitionComponent *entity_get_definition(Registry *r, Entity e);
                                   int32 — versions <6 wrote it without
                                   sprite_id and always load as -1/none)
         [HealthComponent]       if bit2 set
-        [ResourceComponent]     if bit3 set  (ResourceKind as uint8, yield_per_hit as int32)
+        [ResourceComponent]     if bit3 set  (kind as a fixed RESOURCE_NAME_MAX-byte
+                                  name block, NUL-padded, then yield_per_hit as int32.
+                                  Versions <9 stored kind as a single uint8 -- the old
+                                  ResourceKind enum, 0=wood 1=stone, the only two
+                                  values it ever had -- migrated to the equivalent
+                                  name string on load; see registry.c.)
         [MoveComponent speed]   if bit4 set  (float speed only — lerp state resets on load)
         [TaskComponent kind+tgt]if bit5 set  (TaskKind as uint8, target_x/y as int32; path recomputed)
         [ConstructionComponent] if bit6 set  (build_time_total and build_time_done

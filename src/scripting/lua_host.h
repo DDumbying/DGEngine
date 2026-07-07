@@ -21,7 +21,11 @@
         dge.destroy(entity_id)
 
         -- Resource store
-        dge.get_resource(kind)             -> int   (kind: "wood"|"stone")
+        dge.get_resource(kind)             -> int   (kind: any resource name a
+                                                       project uses -- Phase 2B
+                                                       retired the old fixed
+                                                       "wood"|"stone" ResourceKind
+                                                       enum, see simulation.h)
         dge.add_resource(kind, amount)
 
         -- Genre — which fork of the engine this project is running

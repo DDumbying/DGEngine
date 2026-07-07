@@ -51,9 +51,9 @@ int main(void) {
     /* --- Catalog accessors (now ObjectDef-driven, not BuildingKind) --- */
     assert(objdef_is_buildable(&campfire));
 
-    ResourceKind ck; int cost; float build_time;
-    objdef_get_build_spec(&campfire, &ck, &cost, &build_time);
-    assert(ck == RESOURCE_WOOD);
+    char ck[RESOURCE_NAME_MAX]; int cost; float build_time;
+    objdef_get_build_spec(&campfire, ck, sizeof(ck), &cost, &build_time);
+    assert(strcmp(ck, "wood") == 0);
     assert(cost == 20);
     assert(build_time > 0.0f);
     printf("PASS: objdef_get_build_spec resolves cost/time from an ObjectDef's own properties\n");
@@ -74,23 +74,23 @@ int main(void) {
 
     assert(!objdef_can_afford_build(&rs, &campfire)); /* starts at 0 */
     assert(!objdef_try_pay_build_cost(&rs, &campfire)); /* rejected, no partial spend */
-    assert(rs.wood == 0);
+    assert(resource_store_get(&rs, "wood") == 0);
 
-    resource_store_add_wood(&rs, cost - 1);
+    resource_store_add(&rs, "wood", cost - 1);
     assert(!objdef_can_afford_build(&rs, &campfire)); /* one short */
 
-    resource_store_add_wood(&rs, 1);
+    resource_store_add(&rs, "wood", 1);
     assert(objdef_can_afford_build(&rs, &campfire)); /* exact amount */
     assert(objdef_try_pay_build_cost(&rs, &campfire));
-    assert(rs.wood == 0); /* fully spent */
+    assert(resource_store_get(&rs, "wood") == 0); /* fully spent */
     printf("PASS: objdef_can_afford_build/objdef_try_pay_build_cost gate correctly, "
            "no partial spend on rejection\n");
 
     /* --- Refund --- */
     objdef_refund_build_cost(&rs, &campfire);
-    assert(rs.wood == cost);
+    assert(resource_store_get(&rs, "wood") == cost);
     printf("PASS: objdef_refund_build_cost restores the exact amount that was paid\n");
-    resource_store_try_spend_wood(&rs, cost); /* spend it back down for the next section */
+    resource_store_try_spend(&rs, "wood", cost); /* spend it back down for the next section */
 
     /* --- Blueprint placement --- */
     Registry *reg = malloc(sizeof(Registry));

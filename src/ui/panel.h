@@ -29,6 +29,9 @@ typedef enum {
     PANEL_ACTION_RESIZE,
     PANEL_ACTION_WEATHER_TOGGLE,   /* toggle weather enabled/disabled */
     PANEL_ACTION_WEATHER_SET,      /* .weather_type is valid          */
+    PANEL_ACTION_LEVEL_PREV,       /* Phase 3, Part A: cycle to the previous Level */
+    PANEL_ACTION_LEVEL_NEXT,       /* cycle to the next Level                      */
+    PANEL_ACTION_LEVEL_ADD,        /* create a new Level and switch to it          */
 } PanelActionType;
 
 typedef struct {
@@ -126,18 +129,20 @@ int panel_effective_width(const Panel *p);
 #include "../renderer/atlas.h"
 #include "../world/world.h"
 #include "../core/project.h"
+#include "../core/level.h"
 #include "sprites_tab.h"
 
 bool panel_update(Panel *p, Editor *ed, ResourceStore *resources,
                    WeatherSystem *weather,
                    ObjectDefRegistry *obj_registry, SpritesTab *sprites_tab,
                    const SpriteAtlas *atlas, World *world, GenreProfile genre,
+                   const LevelRegistry *levels,
                    int viewport_w, int viewport_h, PanelAction *out_action);
 
 void panel_render(const Panel *p, const Editor *ed, const ResourceStore *resources,
                    const WeatherSystem *weather, const ObjectDefRegistry *obj_registry,
                    const SpriteAtlas *atlas, const SpritesTab *sprites_tab,
-                   const World *world, GenreProfile genre,
+                   const World *world, GenreProfile genre, const LevelRegistry *levels,
                    int viewport_w, int viewport_h);
 
 #endif /* DGE_PANEL_H */

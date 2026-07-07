@@ -1,8 +1,6 @@
 #ifndef DGE_OBJECT_DEF_H
 #define DGE_OBJECT_DEF_H
 
-#include "../simulation/simulation.h"
-
 /*  Phase L — User-defined object types.
 
     An ObjectDef is the *template* for a category of entity — the
@@ -130,27 +128,40 @@ bool prop_value_from_str(PropertyType t, const char *str, PropertyValue *out);
                                   construction (a worker must build it
                                   over time) instead of instant
                                   placement like a plain prefab.
-      build_cost_kind    string  "wood" or "stone". Defaults to "wood"
-                                  if build_time is present but this
-                                  isn't (rather than rejecting the def
-                                  as invalid — an object that's buildable
-                                  but free-to-start is a reasonable
-                                  thing to define).
+      build_cost_kind    string  Any resource name a project wants
+                                  (e.g. "wood", "gold", "mana" — Phase 2B
+                                  retired the old fixed wood/stone-only
+                                  ResourceKind enum, see
+                                  simulation/simulation.h). Defaults to
+                                  "wood" if build_time is present but
+                                  this isn't (rather than rejecting the
+                                  def as invalid — an object that's
+                                  buildable but free-to-start is a
+                                  reasonable thing to define; "wood" is
+                                  just a legacy-compatible default
+                                  string, not a claim the engine knows
+                                  what wood is).
       build_cost_amount  int     Defaults to 0 (free, but still takes
                                   labor) if absent.
 
-    This mirrors BuildingKind's existing cost/time contract in
-    simulation/construction.h closely on purpose — construction.c's
-    objdef-driven functions (construction_place_blueprint_objdef() etc.)
-    are siblings of the BuildingKind ones, not a replacement for them. */
+    This mirrors BuildingKind's old cost/time contract closely on
+    purpose — construction.c's objdef-driven functions
+    (construction_place_blueprint_objdef() etc.) were originally
+    written as siblings of the now-retired BuildingKind ones, and kept
+    the same shape through Phase 2's consolidation. */
 bool objdef_is_buildable(const ObjectDef *def);
 
 /* Resolves cost/time from the properties above, applying the documented
    defaults. Safe to call even when !objdef_is_buildable(def) (returns
-   RESOURCE_WOOD / 0 / 0.0f in that case — "free and instant", which is
+   "wood" / 0 / 0.0f in that case — "free and instant", which is
    never actually read since callers check objdef_is_buildable() first,
-   but means this never hands back garbage). */
-void objdef_get_build_spec(const ObjectDef *def, ResourceKind *out_cost_kind,
+   but means this never hands back garbage).
+
+   out_cost_kind is written as a NUL-terminated string, truncated to
+   out_cost_kind_size if needed (matches simulation.h's
+   RESOURCE_NAME_MAX-sized buffers everywhere else a resource name
+   travels). */
+void objdef_get_build_spec(const ObjectDef *def, char *out_cost_kind, int out_cost_kind_size,
                             int *out_cost_amount, float *out_build_time);
 
 #endif /* DGE_OBJECT_DEF_H */

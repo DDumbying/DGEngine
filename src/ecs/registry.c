@@ -148,11 +148,15 @@ DefinitionComponent *entity_get_definition(Registry *r, Entity e) {
    Save / load — see the format comment in registry.h. */
 
 #define DGEE_MAGIC   "DGEE"
-#define DGEE_VERSION 8u   /* Phase 2 (ObjectDef consolidation): BuildingKind
-                             retired -- ConstructionComponent drops kind +
-                             is_custom, keeps only build_time_total/done,
-                             complete, def_name (always populated now,
-                             every blueprint is an ObjectDef instance).
+#define DGEE_VERSION 9u   /* Phase 2B (ObjectDef consolidation, resources):
+                             ResourceKind retired -- ResourceComponent.kind
+                             is now a RESOURCE_NAME_MAX-byte name block
+                             instead of a single enum byte.
+                             Version 8 retired BuildingKind --
+                             ConstructionComponent drops kind + is_custom,
+                             keeps only build_time_total/done, complete,
+                             def_name (always populated now, every
+                             blueprint is an ObjectDef instance).
                              Version 7 was the construction hookup for
                              user-defined buildable objects (is_custom +
                              def_name added alongside the old kind field).
@@ -222,8 +226,7 @@ bool registry_save(const Registry *r, const char *path) {
         }
         if (ok && (mask & MASK_RESOURCE)) {
             const ResourceComponent *rc = &r->resource[e];
-            unsigned char kind_byte = (unsigned char)rc->kind;
-            ok &= fwrite(&kind_byte,        1,                    1, f) == 1;
+            ok &= fwrite(rc->kind, 1, RESOURCE_NAME_MAX, f) == RESOURCE_NAME_MAX;
             ok &= fwrite(&rc->yield_per_hit, sizeof(rc->yield_per_hit), 1, f) == 1;
         }
         if (ok && (mask & MASK_MOVE)) {
@@ -341,11 +344,23 @@ bool registry_load(Registry *r, const char *path) {
             entity_add_health(loaded, e, h);
         }
         if ((mask & MASK_RESOURCE)) {
-            unsigned char kind_byte;
             ResourceComponent rc;
-            if (fread(&kind_byte,        1,                    1, f) != 1) { ok = false; break; }
+            memset(&rc, 0, sizeof(rc));
+            if (version >= 9u) {
+                if (fread(rc.kind, 1, RESOURCE_NAME_MAX, f) != RESOURCE_NAME_MAX) { ok = false; break; }
+                rc.kind[RESOURCE_NAME_MAX - 1] = '\0';
+            } else {
+                /* v8 and earlier stored kind as a single byte: the old
+                   ResourceKind enum, 0=RESOURCE_WOOD, 1=RESOURCE_STONE
+                   (the only two values that enum ever had). Migrate to
+                   the equivalent name string — same "old data keeps
+                   meaning what it used to mean" discipline as every
+                   other version migration in this codebase. */
+                unsigned char kind_byte;
+                if (fread(&kind_byte, 1, 1, f) != 1) { ok = false; break; }
+                snprintf(rc.kind, sizeof(rc.kind), "%s", kind_byte == 1 ? "stone" : "wood");
+            }
             if (fread(&rc.yield_per_hit, sizeof(rc.yield_per_hit), 1, f) != 1) { ok = false; break; }
-            rc.kind = (ResourceKind)kind_byte;
             entity_add_resource(loaded, e, rc);
         }
         if ((mask & MASK_MOVE)) {

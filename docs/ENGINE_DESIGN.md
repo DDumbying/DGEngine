@@ -263,48 +263,60 @@ and not worth designing prematurely.
 
 ## 6. The Level / Scene System
 
-**This is the largest concrete gap this document identifies. Nothing
-below is built yet.** Its absence is the direct answer to "why can't
-different levels have different map shapes" — there is currently exactly
-one `World` in the entire running program. A project doesn't *contain* a
-map; it *is* one map.
+**Part A is built.** This was the direct answer to "why can't different
+levels have different map shapes" — before this, there was exactly one
+`World` in the entire running program; a project didn't *contain* a
+map, it *was* one map. That's no longer true: a project can now hold
+multiple Levels, each its own World, at any size, in any shape.
 
-### The data shape
+### The data shape **[BUILT]**
 
 ```c
+// core/level.h — matches what's actually implemented
 typedef struct {
-    char name[64];              /* "Level 1", "Goblin Cave", whatever   */
-    char world_path[256];       /* level's own .dge file, own Tileset
-                                    reference (shared project Tileset,
-                                    but this Level's own painted tiles
-                                    and its own WorldShape)              */
-    float spawn_x, spawn_y;     /* default player/party entry point     */
-    char entry_marker[64];      /* optional: named entry point, so a
-                                    transition can target "the door
-                                    that leads back to town" rather than
-                                    always the same default spawn        */
+    char  name[LEVEL_NAME_MAX];    /* "Level 1", "Goblin Cave", whatever   */
+    char  world_path[256];         /* this level's own world .dge file    */
+    char  entity_path[256];        /* this level's own entities .dge file */
+    float spawn_x, spawn_y;        /* default player/party entry point    */
+    char  entry_marker[LEVEL_NAME_MAX]; /* reserved for Part B, unused so far */
 } Level;
 
 typedef struct {
     Level levels[LEVEL_MAX];
     int   count;
-    int   active_index;         /* which Level is currently loaded      */
+    int   active_index;
 } LevelRegistry;
 ```
 
-Each `Level` owns its own `World` — its own dimensions, its own
-`WorldShape`, its own painted `Tile.type` values — but all Levels in a
-project share the *same* `Tileset` and `ObjectDefRegistry`. This is
-exactly why Tileset-as-data
-([§7](#7-content-authoring-tileset--objectdef)) had to happen first: a
-Level system built on top of the old per-project-fixed `TerrainType`
-enum would have been forced to make every level use the same five
-terrains. Now, every level draws from the same *defined* palette but can
-use any subset of it, at any size, in any shape.
+Each `Level` owns its own World data (own dimensions, own `WorldShape`,
+own painted `Tile.type` values, own entities) — but every Level in a
+project shares the *same* `Tileset` and `ObjectDefRegistry`. This fell
+out for free once built: both of those already live independently of
+any single World/Registry instance, so "shared across levels" needed no
+new plumbing. This is exactly why Tileset-as-data
+([§7](#7-content-authoring-tileset--objectdef)) had to land first: a
+Level system built on the old project-wide-fixed `TerrainType` enum
+would have forced every level to use the same five terrains. Now every
+level draws from the same *defined* palette but can use any subset of
+it, at any size, in any shape.
 
-### Transitions
+`SimClock`/`ResourceStore`/`WeatherSystem` stay project-wide, **not**
+per-level — a colony's stockpile or a party's elapsed playtime doesn't
+reset walking through a door to a different map. Only the map and its
+entities are level-scoped.
 
-An entity carries an optional `LevelTransitionComponent`:
+A `levels/manifest.def` (flat key=value, same convention as
+`project.dge`/`.theme` files) lists every Level and which one is
+active. A project saved before Phase 3 (flat `world.dge`/`entities.dge`
+in its root) migrates automatically the first time it's opened
+post-upgrade — the old files are renamed (not copied) into a
+bootstrapped "Level 1"'s paths, same "migrate explicitly, never
+silently reinterpret" discipline as every other version bump in this
+codebase.
+
+### Transitions — **[PLANNED, Part B]**
+
+An entity would carry an optional `LevelTransitionComponent`:
 
 ```c
 typedef struct {
@@ -315,11 +327,19 @@ typedef struct {
 ```
 
 Walking onto (or interacting with) an entity carrying this component
-triggers: unload current Level's `World`/`Registry` state (or push it on
-a stack, for "go back" semantics — decision deferred to implementation
-time), load the target Level's `World`, reposition the player entity at
-the target marker, reposition the camera (see [§4](#4-the-camera-system)'s
+would trigger: unload current Level's `World`/`Registry` state (or push
+it on a stack, for "go back" semantics — decision deferred), load the
+target Level's `World`, reposition the player entity at the target
+marker, reposition the camera (see [§4](#4-the-camera-system)'s
 `CAMERA_DRIVE_BOUNDED` picking up the new Level's extent automatically).
+
+This is deliberately not built yet — Part A is an *authoring-time*
+concept (which map am I editing right now, switchable via the panel's
+level-switcher strip); Part B is a *runtime* concept (a player actually
+moving between maps during gameplay), which needs the Runtime build
+([§17](#17-the-runtime-build)) to mean much on its own. Building
+transitions against Play mode alone (rather than a real Runtime) risked
+solving the wrong problem.
 
 ### How this maps onto real games
 
@@ -330,11 +350,12 @@ the target marker, reposition the camera (see [§4](#4-the-camera-system)'s
   connected by named markers ("came in from the north gate").
 - **RimWorld/sandbox-style**: effectively one Level per playthrough — the
   Level system doesn't force multiple levels to exist, a project can
-  define exactly one and never use transitions at all.
+  define exactly one and never use transitions at all. This is also
+  exactly what every pre-Phase-3 project looks like post-migration.
 - **Tactics-style (Fire Emblem)**: each battle map is its own Level,
   often with no return transition — completing one loads the next in a
   fixed sequence, which is just `rules.def`-driven scripting on top of
-  the same transition mechanism.
+  the same transition mechanism (once Part B exists).
 
 The Level system doesn't presume any of these shapes. It's the minimal
 data structure that makes all of them expressible.
@@ -342,22 +363,28 @@ data structure that makes all of them expressible.
 ### Editor implications
 
 - Project Manager gains a Levels list (parallel to how it already lists
-  recent projects) — create/rename/delete/duplicate a Level.
+  recent projects) — create/rename/delete/duplicate a Level. **[PARTIAL]**
+  — `ui/panel.c`'s level-switcher strip (`[<] [name (i/N)] [>] [+]`)
+  covers cycle and add; rename/delete/duplicate aren't wired yet
+  (**[PLANNED]**, would follow the same inline-rename pattern PAINT
+  mode's Tileset list already established in Phase 1).
 - The World tab edits whichever Level is currently active; switching
   active Level swaps which `World`/`WorldShape` the panel and Shape Pane
-  are pointed at. No change to `panel.c`'s internals — it already takes
-  a `World*` parameter, so "which World" becomes "which Level's World,"
-  not a new code path.
-- Save format: `project.dge` gains a `levels/` manifest; each Level's
-  `.dge` world file is otherwise identical in format to what
-  `world_save()`/`world_load()` already produce (**[BUILT]**, v4 format,
-  see [§16](#16-save-formats--versioning)) — a Level *is* a named
-  `world.dge` file plus spawn metadata, not a new file format.
+  are pointed at. **[BUILT]** — no change to `panel.c`'s internals was
+  needed for this part, it already took a `World*` parameter, so "which
+  World" became "which Level's World" with no new code path; only the
+  level-switcher strip itself is new UI.
+- Save format: each Level's `.dge` world file is identical in format to
+  what `world_save()`/`world_load()` already produced (**[BUILT]**, v4
+  format, see [§16](#16-save-formats--versioning)) — a Level *is* a
+  named `world.dge` file plus spawn metadata, not a new file format, as
+  designed. **[BUILT]**
 
-**Sequencing note:** this is Phase 3 in the production sequence
-([§21](#21-production-sequencing)), after ObjectDef consolidation. It's
-listed here in full because it's architecturally central, not because
-it's next in line to be coded.
+**Sequencing note:** this was Phase 3 in the production sequence
+(`ROADMAP.md`, which is the authoritative numbering — this section's
+own internal phase references below have been updated to match it), and
+is now done for Part A. Part B (transitions) belongs alongside the
+Runtime build.
 
 ---
 
@@ -431,23 +458,35 @@ wherever the old format implied `BUILDING_CAMPFIRE` — same "migrate
 explicitly, never silently reinterpret" discipline as world.c's v3→v4
 Tileset migration ([§16](#16-save-formats--versioning)).
 
-### ResourceKind — not yet consolidated
+### ResourceKind — retired **[BUILT]**
 
-**[PLANNED — Phase 2, Part B, not yet started.]**
+**Resources (Phase 2, Part B) is done.** `ResourceKind`
+(`simulation/simulation.h`) — the fixed wood/stone 2-value enum, the
+last piece of the original three-enum problem — is gone. `ResourceStore`
+is now a dynamic named list (`ResourceEntry{name, amount}[]`) that grows
+to fit whatever resource names a project actually uses — an ObjectDef's
+`drops` property, a blueprint's `build_cost_kind` property, a script's
+`dge.add_resource()` call — rather than declaring resource kinds ahead
+of time in a separate file. `ResourceComponent.kind` follows the same
+"store the name, resolve on demand" pattern already established by
+`ConstructionComponent.def_name`/`DefinitionComponent.def_name`.
 
-`ResourceKind` (`simulation/simulation.h`) — wood/stone, a 2-value enum
-— is the one piece of the original three-enum problem left standing.
-The plan: `ResourceKind`'s fixed wood/stone becomes project data, a
-`resources.def` listing whatever resource kinds a project wants (a
-tactics game defines zero; a farming game defines `seed`/`crop`/`gold`).
-`ResourceStore` becomes a dynamic map instead of a two-field struct.
+A `resources.def` declaration file was considered (see `ROADMAP.md`'s
+Part B write-up) and deliberately not built — once the store grows from
+usage the same way Tileset/ObjectDefs already do, there was nowhere
+left for a separate declaration step to add value.
 
-This touches real surface area beyond what Part A did:
-`ResourceComponent`, `harvest.c`'s wood/stone dispatch, the sim save
-format (`sim.dge`), the HUD's `W:%d S:%d` readout, and the Lua API's
-`dge.get_resource(kind)`/`dge.add_resource(kind, amount)` (currently
-hardcoded to only accept the strings `"wood"`/`"stone"`). Deliberately
-scoped as its own pass rather than bundled into Part A.
+Entity save format bumped to v9 (`ResourceComponent.kind` as a name
+block instead of a single enum byte) and the simulation save format
+(`sim.dge`) to v2 (named list instead of fixed `int32 wood, int32
+stone`); both migrate automatically from their prior versions, same
+"migrate explicitly, never silently reinterpret" discipline as every
+other version bump in this codebase.
+
+The Lua API (`dge.get_resource`/`dge.add_resource`) got *simpler* as a
+result — the old 2-branch wood-or-stone dispatch is gone, replaced by a
+direct call into the name-based store, unchanged from a script's point
+of view since the API always just took a string.
 
 This is real, scoped, next-in-line work — not a someday item.
 
@@ -900,22 +939,29 @@ work:
 Phase 1  Tileset-as-data                          DONE
 Phase 2  Retire PrefabKind/BuildingKind/ResourceKind
            Part A (Placement)                     DONE
-           Part B (Resources)                      next
-Phase 3  Level/Scene system (§6)                   depends on Phase 2B
-Phase 4  Win/lose/goals (§13)                      depends on Phase 3
-Phase 5  Runtime build (§17)                       depends on Phase 3-4
-Phase 6  Camera drivers (§4), in-game UI, audio (§18)   depends on Phase 5
-Phase 7  ECS scale (dense/sparse), chunked worlds   unscoped, as-needed
+           Part B (Resources)                     DONE
+Phase 3  Level/Scene system (§6)
+           Part A (authoring-time levels)          DONE
+           Part B (runtime transitions)            depends on Phase 6
+Phase 4  Sidebar cleanup                           next
+Phase 5  Win/lose/goals (§13)                      depends on Phase 4
+Phase 6  Runtime build (§17)                       depends on Phase 3B, 5
+Phase 7  Camera drivers (§4), in-game UI, audio (§18)   depends on Phase 6
+Phase 8  ECS scale (dense/sparse), chunked worlds   unscoped, as-needed
 ```
 
-Phase ordering follows dependency, not difficulty — Levels can't be
-meaningfully authored until content (Tileset done, ObjectDef
-consolidation next) is fully data-driven, because a Level system built
-on the old hardcoded content types would just be multiple copies of the
-same fixed content. Win/lose needs Levels to have somewhere to be scoped
-to ("win when this Level's condition is met"). Runtime needs Levels and
-win/lose both, because a Runtime with no level-transition concept and no
-objective isn't meaningfully different from Play mode.
+Phase ordering follows dependency, not difficulty — Levels couldn't be
+meaningfully authored until content (Tileset, then ObjectDef
+consolidation) was fully data-driven, because a Level system built on
+the old hardcoded content types would have just been multiple copies of
+the same fixed content. Win/lose needs Levels to have somewhere to be
+scoped to ("win when this Level's condition is met"). Runtime needs
+Levels and win/lose both, because a Runtime with no level-transition
+concept and no objective isn't meaningfully different from Play mode.
+
+This table's numbering matches `ROADMAP.md`'s own phase headings, which
+is the authoritative sequencing document — this table is kept in sync
+with it, not the other way around.
 
 ---
 

@@ -74,16 +74,24 @@ of the codebase needs to catch up to their standard.
 
 ## 3. What's missing outright (not just hardcoded wrong)
 
-Cleaning up enums doesn't get to "ships a real game" on its own. These
-don't exist at all yet:
+Cleaning up enums doesn't get to "ships a real game" on its own. As of
+this document's original writing, none of these existed at all:
 
 - Win/lose/goal system — a sandbox with no objective isn't a game.
+  **Still missing** — Phase 5.
 - Multi-layer tiles — one terrain type per cell, no floor/wall/roof,
-  no elevation. Most isometric genres need stacked layers.
-- Level/scene concept — one World per project, forever.
+  no elevation. Most isometric genres need stacked layers. **Still
+  missing** — unscoped, Phase 7+.
+- ~~Level/scene concept — one World per project, forever.~~ **Built,
+  Phase 3, Part A** — a project can now contain multiple Levels, each
+  its own World with its own dimensions/shape/entities. Part B
+  (`LevelTransitionComponent`, walking between levels during actual
+  gameplay) still doesn't exist — that needs the Runtime (Phase 6).
 - Export/build — no path from project to standalone runnable artifact.
+  **Still missing** — Phase 6.
 - In-game UI layer distinct from the editor's immediate-mode panels.
-- Audio, anywhere.
+  **Still missing** — Phase 7+.
+- Audio, anywhere. **Still missing** — Phase 7+.
 
 These are named here so they're not silently forgotten, not because all
 of them are happening in the next pass.
@@ -95,7 +103,7 @@ of them are happening in the next pass.
 Ordered around proving the architecture by finishing one real, complete,
 shippable game — not around finishing every engine feature first. Later
 items will reshape themselves once earlier ones exist, so this list
-intentionally doesn't plan past Phase 4 in detail yet.
+intentionally doesn't plan past Phase 5 in detail yet.
 
 ### Phase 1 — Tileset-as-data ✅ DONE
 Collapse `TerrainType` from an engine enum into project data.
@@ -210,23 +218,138 @@ One content system instead of three parallel ones.
   here. A fresh project's `ObjectDefRegistry` starts empty, exactly
   matching Phase 1's "a fresh project's Tileset starts empty" precedent.
 
-**Part B — Resources (ResourceKind) — not yet started**
-- `ResourceKind`'s fixed wood/stone becomes project data: a
-  `resources.def` listing whatever resource kinds a project wants (a
-  tactics game defines zero; a farming game defines
-  `seed`/`crop`/`gold`).
-- `ResourceStore` (`simulation/simulation.h`) becomes a dynamic map
-  instead of a two-field struct.
-- Touches real surface area beyond Part A: `ResourceComponent`,
-  `harvest.c`'s wood/stone dispatch, the sim save format
-  (`sim.dge`), the HUD's `W:%d S:%d` readout, and the Lua API's
-  `dge.get_resource(kind)`/`dge.add_resource(kind, amount)` (currently
-  hardcoded to accept only the strings `"wood"`/`"stone"`).
-- Explicitly scoped as its own pass rather than bundled into Part A —
-  attempting both at once risked finishing neither to the same
-  standard as Phase 1.
+**Part B — Resources (ResourceKind) ✅ DONE**
+- `ResourceKind` (the fixed wood/stone 2-value enum) is retired
+  entirely. `ResourceStore` (`simulation/simulation.h`) is now a
+  dynamic named list (`ResourceEntry{name, amount}[]`, up to
+  `RESOURCE_STORE_MAX_KINDS`) rather than a two-field struct — a
+  project can have wood/stone, or gold/mana, or nothing at all, or
+  twenty different named materials. The store doesn't declare its
+  resource kinds ahead of time anywhere; it just grows to fit whatever
+  names harvest/construction/scripts use, the same "starts empty,
+  grows from use" pattern established for Tileset/ObjectDefs.
+- `ResourceComponent.kind` (`ecs/components.h`) changed from
+  `ResourceKind` to a plain `RESOURCE_NAME_MAX`-byte name string — same
+  "store the name, resolve on demand" pattern already used by
+  `ConstructionComponent.def_name`/`DefinitionComponent.def_name`.
+- `objdef_get_build_spec()` (`core/object_def.h`) now outputs a
+  resource name string instead of a `ResourceKind` — `object_def.h` no
+  longer needs to include `simulation.h` at all as a result, one more
+  small layering cleanup alongside Part A's atlas.h fix.
+- `game/prefabs.c`'s `objdef_spawn_instance()` "drops" property mapping
+  now accepts any resource name (previously hardcoded to only
+  recognize the literal strings `"wood"`/`"stone"`).
+- `scripting/lua_host.c`'s `dge.get_resource(kind)`/
+  `dge.add_resource(kind, amount)` actually got *simpler* — the
+  2-branch wood-or-stone dispatch is gone, replaced by a direct call
+  into the now name-based `resource_store_get()`/`resource_store_add()`.
+  These functions work for any resource name a project uses now,
+  unchanged Lua-facing signature (it always just took a string).
+- HUD (`ui/ui.c`) no longer shows a fixed `W:%d S:%d` — it iterates
+  whatever the project's `ResourceStore` actually holds.
+- Entity save format bumped to v9 (`ResourceComponent.kind` as a name
+  block instead of a single enum byte); v8 and earlier migrate
+  automatically (`0`→`"wood"`, `1`→`"stone"`, the only two values that
+  enum ever had).
+- Simulation save format (`sim.dge`) bumped to v2 (named resource list
+  instead of fixed `int32 wood, int32 stone`); v1 migrates
+  automatically into `"wood"`/`"stone"` entries. Same "migrate
+  explicitly, never silently reinterpret" discipline as every other
+  version bump in this codebase.
+- Test suite: `tests/test_simulation.c` rewritten around the named
+  `ResourceStore` API (dynamic growth, spend/refund atomicity, capacity
+  limits, v1→v2 migration). `tests/test_construction.c` updated for the
+  string-based `objdef_get_build_spec()`.
+- **Deviation from the original plan, worth calling out explicitly**:
+  the original Part B description above called for a `resources.def`
+  file declaring a project's resource kinds ahead of time. That turned
+  out to be unnecessary — since `ResourceStore` already grows to fit
+  whatever names get used (mirroring how a fresh Tileset/ObjectDef
+  registry also just starts empty and grows from authoring, not from a
+  separate declaration step), a project's resource kinds are already
+  fully defined by *usage* (an ObjectDef's `drops` property, a
+  blueprint's `build_cost_kind` property, a script's
+  `dge.add_resource()` call) with nowhere left for a `resources.def` to
+  add value. No such file was built, and none is currently planned.
 
-### Phase 3 — Sidebar cleanup
+### Phase 3 — Level/Scene system ✅ DONE (Part A)
+The direct answer to "why can't different levels have different map
+shapes" — before this, a project WAS one World, exactly one world.dge,
+forever. See `ENGINE_DESIGN.md` §6 for the full design reasoning; this
+had to wait until Phase 1 (Tileset-as-data) and Phase 2 (ObjectDef
+consolidation) landed, since a Level system built on the old
+project-wide-fixed content types would have forced every level to share
+identical terrain/objects rather than just sharing the same *defined*
+palette.
+
+**What actually shipped (Part A — the authoring-time concept, "which
+map am I editing right now"):**
+- `core/level.h`/`.c` — new `Level`/`LevelRegistry` types. A Level is a
+  name plus a `world_path`/`entity_path` pair (its own `.dge` files, in
+  exactly the v4/v9 formats `world_save()`/`registry_save()` already
+  produce — a Level isn't a new file format, just a named pointer to
+  one) plus a default spawn point (`spawn_x`/`spawn_y`/`entry_marker`,
+  the latter reserved for Part B, unused so far).
+- Every Level in a project shares the same `Tileset` and
+  `ObjectDefRegistry` — this fell out for free, since both already live
+  independently of any single World/Registry instance rather than
+  needing new plumbing.
+- `SimClock`/`ResourceStore`/`WeatherSystem` stay project-wide, NOT
+  per-level — `sim.dge`/weather save data are unaffected by which Level
+  is active. A colony's stockpile or a party's elapsed playtime doesn't
+  reset when walking through a door to a different map.
+- `levels/manifest.def` — flat key=value, same convention as
+  `project.dge`/`.theme` files, listing every Level plus which one is
+  active.
+- **Legacy migration**: a project saved before Phase 3 (flat
+  `world.dge`/`entities.dge` in its root, no `levels/` folder at all)
+  gets its files renamed (not copied) into a bootstrapped "Level 1"'s
+  paths the first time it's opened post-upgrade — same "migrate
+  explicitly, never silently reinterpret" discipline as every other
+  version bump in this codebase. A genuinely brand-new project also
+  bootstraps a single default "Level 1" — the one deliberate exception
+  to this consolidation's "start empty, honest" pattern (Tileset,
+  ObjectDefRegistry): there has to be at least one Level for the World
+  tab to have anything to point at, the same way `world_create()`
+  itself is never optional even when its Tileset is.
+- `ui/panel.c` — a level-switcher strip at the top of the World tab's
+  sidebar: `[<] [Level Name (i/N)] [>] [+]`. `<`/`>` cycle levels
+  (saving the one you're leaving, loading the one you're entering,
+  re-fitting the camera and the panel's resize fields to the new
+  Level's own dimensions). `+` creates a new Level — starts as a plain
+  rectangle at the project's default grid size; shaping/resizing it
+  further is a SHAPE-mode/Settings job once it's active, not something
+  the add button needs to ask up front.
+- `main.c` — `ENTER_EDITOR`'s world/registry loading sequence was
+  extracted into a reusable `LOAD_ACTIVE_LEVEL()` macro, used both on
+  first project entry and on every level switch, so the two paths can't
+  quietly drift apart on what "loading a level" actually means. Fixed
+  `WORLD_SAVE_PATH`/`ENTITY_SAVE_PATH` constants are now only used as
+  legacy-migration source paths and initial fallback defaults — every
+  live save/load call site resolves the active Level's own paths
+  (`cur_world_path`/`cur_entity_path`, refreshed via
+  `REFRESH_LEVEL_PATHS()` whenever the active Level changes).
+- Test suite: `tests/test_level.c` — add/slugging, capacity limits,
+  bounds-checked accessors, bootstrap, save/load round-trip, malformed-
+  manifest clamping, and legacy-file migration (including the "already
+  migrated, second call is a clean no-op" case).
+
+**Deliberately not built in this pass (Part B):**
+- `LevelTransitionComponent` — an entity walking through a door to
+  change levels *during actual gameplay*. Part A is authoring-time only
+  (switching which map you're editing); Part B is the runtime concept
+  (a player moving between maps), which needs the Runtime build (Phase
+  6 below) to mean much on its own.
+- Level rename/delete/duplicate from the UI. The switcher strip can
+  cycle and add; renaming or removing a Level isn't wired yet (would
+  follow the same inline-rename pattern PAINT mode's Tileset list
+  already established in Phase 1, applied here later).
+- Per-level camera drive mode (`ENGINE_DESIGN.md` §4's
+  `CAMERA_DRIVE_BOUNDED`/`FOLLOW`/`FIXED`) — the editor's camera is
+  still exclusively free-pan/zoom; a Level doesn't yet carry or apply
+  any camera-behavior data of its own.
+
+### Phase 4 — Sidebar cleanup
 Now that Phase 1–2 remove the reasons the sidebar got cluttered:
 
 - World-editing sidebar shows exactly: mode switch, the active mode's
@@ -240,7 +363,7 @@ Now that Phase 1–2 remove the reasons the sidebar got cluttered:
   independently, with `project.grid_w/h` going stale after either path)
   into one owner.
 
-### Phase 4 — Win/lose/goal system
+### Phase 5 — Win/lose/goal system
 The smallest addition that turns a sandbox into an actual game.
 
 - `rules.def` gains win/lose condition scripts (Lua, evaluated each
@@ -250,17 +373,19 @@ The smallest addition that turns a sandbox into an actual game.
   data can define what 'winning' means" works end to end, not building
   a complete objectives/scoring system.
 
-### Phase 5 — Runtime build (not yet scoped in detail)
+### Phase 6 — Runtime build (not yet scoped in detail)
 A real, even if crude, path from "finished project" to "standalone
 runnable thing." Strip editor UI, load one project's data, run it. This
-is the actual test of whether Phases 1–4 produced an engine or just a
-cleaner editor.
+is the actual test of whether Phases 1–5 produced an engine or just a
+cleaner editor. This is also where Level system Part B
+(`LevelTransitionComponent`, a player actually walking between maps)
+belongs — a runtime concept needs a runtime to run in.
 
-### Phase 6+ — Not yet scoped
-Multi-layer tiles, scenes/levels, audio, in-game UI. Each is a real,
-separate body of work. Deliberately left unplanned in detail until
-Phases 1–5 are done and have reshaped what these actually need to look
-like.
+### Phase 7+ — Not yet scoped
+Multi-layer tiles, audio, in-game UI, per-level camera drive modes.
+Each is a real, separate body of work. Deliberately left unplanned in
+detail until Phases 1–6 are done and have reshaped what these actually
+need to look like.
 
 ---
 
@@ -278,10 +403,11 @@ Named explicitly so it's clear what's *not* being rebuilt:
 
 ---
 
-## 6. Starting point
+## 6. Current status
 
-Phase 1 (Tileset-as-data) starts next, building directly on top of the
-existing `TileSpriteMap`/sprite-atlas/save-format work already in the
-codebase rather than replacing it — this is the same data those systems
-already half-implement, finished properly instead of staying a
-five-enum special case.
+Phases 1–3 are complete (Tileset-as-data; PrefabKind/BuildingKind/
+ResourceKind retired into ObjectDef; the Level/Scene system's Part A).
+Phase 4 (Sidebar cleanup) is next — collapsing the two competing world-
+resize owners and moving Weather/resource controls into a
+genre-gated Settings section, now that Phases 1–3 removed the reasons
+the World sidebar got cluttered in the first place.

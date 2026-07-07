@@ -44,20 +44,29 @@ typedef struct {
 } HealthComponent;
 
 /*  Phase 5: what resource this entity yields when harvested and how much
-    per harvest stroke.  Two types are enough for now.
-    yield_per_hit is deducted from the entity's HealthComponent each time
-    a harvest action fires; if health reaches 0 the entity is destroyed
-    and the resources credited to the ResourceStore.
+    per harvest stroke.  yield_per_hit is deducted from the entity's
+    HealthComponent each time a harvest action fires; if health reaches
+    0 the entity is destroyed and the resources credited to the
+    ResourceStore.
 
-    ResourceKind itself now lives in simulation/simulation.h, not here —
-    core/object_def.h's objdef_get_build_spec() needed it too (for
-    build_cost_kind), and object_def.h can't include this header to get
-    it (this header already includes object_def.h, for OBJDEF_NAME_MAX
-    on DefinitionComponent below). simulation.h has no includes of its
-    own, so it's the one place both sides can reach without a cycle. */
+    Phase 2B (ObjectDef consolidation, resources): kind is now a plain
+    resource name string, not a ResourceKind enum — that enum (fixed to
+    exactly wood/stone) is retired. See simulation/simulation.h's own
+    doc comment for why ResourceStore is a named list rather than an
+    index-keyed one: there's no compact per-tile storage pressure here
+    the way there is for Tile.type, so a plain name (same as
+    ConstructionComponent.def_name/DefinitionComponent.def_name just
+    below) is the simpler, more consistent choice than adding a parallel
+    indexed-registry system that a handful of named amounts never
+    needed.
+
+    RESOURCE_NAME_MAX itself lives in simulation.h (not duplicated
+    here) — this header already includes simulation.h for
+    ResourceStore-adjacent reasoning elsewhere, so there's no new
+    include needed for this change. */
 typedef struct {
-    ResourceKind kind;
-    int          yield_per_hit; /* resources credited per successful chop/mine */
+    char kind[RESOURCE_NAME_MAX];
+    int  yield_per_hit; /* resources credited per successful chop/mine */
 } ResourceComponent;
 
 /*  Phase 6: movement state for entities that can walk tile-to-tile.

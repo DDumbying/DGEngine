@@ -1,18 +1,24 @@
-# DGEngine - Dumb Game Engine
+# DGEngine
 
-An isometric simulation engine built from scratch in C using SDL2 and OpenGL.
+> **DGEngine (Dumbest Game Engine)** — an isometric simulation engine built from scratch in C using SDL2 and OpenGL.
 
 Built because understanding a thing properly means building it yourself.
+This is not competing with Unity or Unreal. It is a focused tool for one specific genre: strategy, management, sandbox, and world-simulation games (think RimWorld, Factorio, Banished).
 
-> This is not competing with Unity or Unreal. It is a focused tool for one specific genre: strategy, management, sandbox, and world-simulation games (think RimWorld, Factorio, Banished).
+---
 
 ## Philosophy
 
-I actually want to build something cool, even if most reasources keep making me question my self if i am a dumb by making something like that?, But i mean, this is the main reason i made this org! to make the Dumbest things ever!
+> Understand everything. Abstract only when necessary.
+
+Every system is written to be readable. No magic. No hidden layers.
+If something breaks, you should be able to trace it to a single function.
+
+---
 
 ## Current State
 
-All 8 phases are complete, plus save-completeness and construction passes after Phase 8. See [`log.md`](./docs/log.md) for the full development log.
+All 8 phases are complete, plus save-completeness and construction passes after Phase 8. See [`log.md`](log.md) for the full development log.
 
 The engine features a full A\* pathfinding system, autonomous worker agents, a task system (move, harvest, build), smooth movement interpolation, v4 entity serialization, a dynamic weather system, a worker-built construction system (place a blueprint, assign a worker, watch it build), and an on-screen HUD (bitmap-font text, no texture dependency) showing resources, sim time, weather, editor mode, and a cost preview when placing a blueprint. F5/F9 persist the full session state — world, entities, sim clock, resources, and weather — across four independent save files.
 
@@ -56,6 +62,7 @@ Controls:
   (not per-frame). Fine at current entity counts; revisit with a spatial
   index if Simulation/AI phases push entity counts high enough to matter.
 
+---
 
 ## Building
 
@@ -80,6 +87,75 @@ make test
 
 GLAD is vendored in `external/glad/`. No other external setup needed.
 
+---
+
+## Project Structure
+
+```
+DGEngine/
+├── src/
+│   ├── main.c                 ← Entry point and main loop
+│   ├── core/
+│   │   ├── log.h / log.c      ← Logging (INFO / WARN / ERROR)
+│   │   └── time.h / time.c    ← Delta-time and frame counter
+│   ├── platform/
+│   │   ├── window.h / window.c ← SDL2 window + GL context
+│   │   └── input.h / input.c   ← Keyboard, mouse, scroll state
+│   ├── renderer/
+│   │   ├── shader.h / shader.c  ← GLSL compile, link, uniforms
+│   │   ├── camera.h / camera.c  ← Ortho camera, pan, zoom-to-point, screen->world
+│   │   ├── renderer.h / renderer.c ← Batch quad + isometric tile draw + screen-space UI mode
+│   │   └── texture.h            ← Texture stub (lands with sprites, later phase)
+│   ├── world/
+│   │   ├── tile.h                ← Terrain types, base colors, walkability
+│   │   └── world.h / world.c     ← Tilemap, value-noise generation, render, save/load
+│   ├── ecs/
+│   │   ├── entity.h              ← Entity id type + EntityHandle (index+generation)
+│   │   ├── components.h          ← Transform/Renderable/Health/Resource/Move/Task components
+│   │   ├── registry.h / registry.c ← Entity lifecycle, component storage, save/load (v3)
+│   │   └── systems.h / systems.c ← system_render_entities and future systems
+│   ├── math/
+│   │   ├── vec2.h               ← 2D vector (inline)
+│   │   ├── vec3.h               ← 3D vector (inline)
+│   │   ├── mat4.h               ← Column-major 4×4 matrix (inline)
+│   │   └── math_utils.h         ← clamp, lerp, PI constants
+│   ├── editor/
+│   │   └── editor.h / editor.c   ← Terrain painting, prefab placement, selection, harvest/move hints
+│   ├── simulation/
+│   │   ├── simulation.h / simulation.c ← SimClock, ResourceStore, both with save/load
+│   │   ├── harvest.h / harvest.c       ← One-shot harvest action on Health+Resource entities
+│   │   ├── construction.h / construction.c ← Building catalog, blueprint placement, labor system
+│   │   └── weather.h / weather.c       ← Sunny/rain/snow cycle, particles, save/load
+│   ├── ai/
+│   │   ├── path.h                     ← Fixed-size Path type shared by pathfinder + TaskComponent
+│   │   ├── pathfinder.h / pathfinder.c ← A* on the tile grid
+│   │   └── agent.h / agent.c           ← Per-frame task/movement update for Move+Task entities
+│   ├── ui/
+│   │   ├── font.h / font.c   ← Hand-drawn 5x7 bitmap glyph table
+│   │   ├── text.h / text.c   ← Renders strings via the font table as quads
+│   │   └── ui.h / ui.c       ← HUD composition (resources, clock, weather, mode, hints)
+│   └── game/
+│       ├── prefabs.h / prefabs.c ← Shared entity templates (tree, rock, worker)
+│       └── player.h / player.c   ← Player stub (future phase)
+├── tests/
+│   ├── test_registry.c      ← generation-counter + entity save/load round-trip
+│   ├── test_picking.c       ← iso-projection inverse-math round-trip
+│   ├── test_pathfinder.c    ← A* correctness (obstacles, unreachable goals)
+│   ├── test_weather.c       ← state transitions, speed multipliers, save/load round-trip
+│   ├── test_simulation.c    ← SimClock/ResourceStore save/load round-trip (incl. paused state)
+│   └── test_construction.c  ← building catalog, afford/pay gating, labor/completion contract
+├── external/
+│   └── glad/                   ← OpenGL loader (vendored)
+├── docs/
+│   ├── ai.md
+│   ├── log.md
+│   └── whatAndWhy.md
+├── Makefile
+└── README.md
+```
+
+---
+
 ## Technology
 
 | Category | Choice |
@@ -97,17 +173,14 @@ quad). ImGui is *not* planned anymore: Phase 4 (Editor) shipped without
 it — see "Known limitations" above for why — and nothing since has made
 a strong enough case to reconsider.
 
-## Note
+---
 
-Since I like documenting my thoughts and progress whenever I can, this repository may not always receive constant commits or visible development updates.
+## Related Projects
 
-For now, this is everything I currently have for the project.
-I will be documenting the entire learning and development journey [here](./docs/log.md), Or in the main Org website from [here]( https://ddumbying.vercel.app) including research notes, architecture ideas, rendering concepts, experiments, and everything I study along the way.
+- [Dchess](https://github.com/DDumbying/Dchess) — Dumb Chess
+- [BTorrent](https://github.com/DDumbying/BTorrent) — BitTorrent client
+- [DDumbying org site](https://ddumbying.vercel.app)
 
-So even if the repository appears inactive at times, work and learning may still be happening behind the scenes.
+---
 
-**See other Projects from here**:
-
-- [Dchess - Dumb Chess](https://github.com/DDumbying/Dchess).
-- [BTorrent - A BitTorrent Client built for fun (learn)](https://github.com/DDumbying/BTorrent).
-
+> Making dumb things is how you eventually make smart things.

@@ -205,6 +205,7 @@ bool panel_update(Panel *p, Editor *ed, ResourceStore *resources,
                    WeatherSystem *weather,
                    ObjectDefRegistry *obj_registry, SpritesTab *sprites_tab,
                    const SpriteAtlas *atlas, World *world, GenreProfile genre,
+                   const LevelRegistry *levels,
                    int viewport_w, int viewport_h, PanelAction *out_action) {
     (void)viewport_w;
     (void)sprites_tab;
@@ -248,6 +249,39 @@ bool panel_update(Panel *p, Editor *ed, ResourceStore *resources,
     const int btn_h = 28;
     const int gap = 4;
     const int btn_w = PANEL_WIDTH - margin * 2;
+
+    /* --- Level switcher strip (Phase 3, Part A) ---
+       [<] [Level Name (i/N)] [>] [+]  — cycles/adds Levels. main.c
+       does the actual save-current/switch-active/load-new sequencing
+       (see PANEL_ACTION_LEVEL_PREV/NEXT/ADD's handlers there); this
+       panel only ever reports the click, the same "panel reports,
+       main.c sequences the I/O" division of labor PANEL_ACTION_SAVE/
+       LOAD already established. */
+    {
+        const int STRIP_H = 24;
+        int nav_w = 20;
+        int add_w = 20;
+        int name_w = btn_w - nav_w * 2 - add_w - 6; /* 3 x 2px gaps */
+        Rect prev_r = { margin,                          y, nav_w,  STRIP_H };
+        Rect name_r = { margin + nav_w + 2,               y, name_w, STRIP_H };
+        Rect next_r = { margin + nav_w + 2 + name_w + 2,  y, nav_w,  STRIP_H };
+        Rect add_r  = { margin + btn_w - add_w,           y, add_w,  STRIP_H };
+        (void)name_r;
+
+        if (lmb && levels && levels->count > 1 && rect_contains(prev_r, mx, my)) {
+            out_action->type = PANEL_ACTION_LEVEL_PREV;
+            return true;
+        }
+        if (lmb && levels && levels->count > 1 && rect_contains(next_r, mx, my)) {
+            out_action->type = PANEL_ACTION_LEVEL_NEXT;
+            return true;
+        }
+        if (lmb && rect_contains(add_r, mx, my)) {
+            out_action->type = PANEL_ACTION_LEVEL_ADD;
+            return true;
+        }
+        y += STRIP_H + gap;
+    }
 
     /* --- Mode buttons --- */
     static const EditorMode modes[] = { EDITOR_MODE_PAINT, EDITOR_MODE_PLACE, EDITOR_MODE_SELECT, EDITOR_MODE_SHAPE };
@@ -340,8 +374,14 @@ bool panel_update(Panel *p, Editor *ed, ResourceStore *resources,
                open. Renaming force-scrolls itself to the top of the
                list (see the RMB/"+ ADD TILE" handlers below), so its
                row is always exactly at list_y — no need to search for
-               where it scrolled to. */
-            bool rename_committed_this_frame = false;
+               where it scrolled to. Committing (Enter, or clicking
+               anywhere outside the row) just clears renaming_slot and
+               falls through — the SAME click that commits also gets
+               to register on whatever it actually landed on below
+               (see the long comment on that loop for why this matters:
+               it used to be gated behind "only if we didn't just
+               commit", which was the bug that made adding a second
+               tile require two clicks). */
             if (p->renaming_slot >= 0) {
                 Rect name_r = { margin + btn_h + 4, list_y, btn_w - btn_h - 4, btn_h };
                 bool enter = textinput_update(&p->rename_field, (float)name_r.x, (float)name_r.y,
@@ -350,7 +390,6 @@ bool panel_update(Panel *p, Editor *ed, ResourceStore *resources,
                     tileset_rename(&world->tileset, p->renaming_slot, textinput_get(&p->rename_field));
                     textinput_unfocus(&p->rename_field);
                     p->renaming_slot = -1;
-                    rename_committed_this_frame = true;
                 } else if (lmb) {
                     Rect row_r = { margin, list_y, btn_w, btn_h };
                     if (!rect_contains(row_r, mx, my)) {
@@ -360,12 +399,31 @@ bool panel_update(Panel *p, Editor *ed, ResourceStore *resources,
                         tileset_rename(&world->tileset, p->renaming_slot, textinput_get(&p->rename_field));
                         textinput_unfocus(&p->rename_field);
                         p->renaming_slot = -1;
-                        rename_committed_this_frame = true;
                     }
                 }
             }
 
-            if (lmb && !rename_committed_this_frame) {
+            /* NOTE: this used to be `if (lmb && !rename_committed_this_frame)`.
+               That guard was the actual bug behind "adding a second tile
+               doesn't work" — when a rename was in progress and the user
+               clicked "+ ADD TILE" to commit-and-add in one motion, the
+               click's first job (landing outside the renaming row, so it
+               commits the pending name) consumed the ENTIRE click, and
+               this block never got a chance to also process what the
+               click actually landed on. The user had to click "+ ADD
+               TILE" a second time before anything happened — which reads
+               exactly like "my second tile isn't being created" from the
+               outside. A commit-by-clicking-away and the click's own
+               target action are two different things that both need to
+               happen from one physical click; skipping the second because
+               the first happened is the bug. Now: the rename commit above
+               (if any) has already run and cleared renaming_slot, so this
+               loop just runs normally against the same click every time —
+               there's no "already used up" click to protect against,
+               because rect hit-testing below is naturally exclusive
+               (a click can only land on one row's rect regardless of what
+               state changed a moment earlier in the same frame). */
+            if (lmb) {
                 int idx = start;
                 int ry  = list_y;
                 while (idx < total && ry + btn_h <= max_list_y) {
@@ -548,7 +606,7 @@ bool panel_update(Panel *p, Editor *ed, ResourceStore *resources,
 void panel_render(const Panel *p, const Editor *ed, const ResourceStore *resources,
                    const WeatherSystem *weather, const ObjectDefRegistry *obj_registry,
                    const SpriteAtlas *atlas, const SpritesTab *sprites_tab,
-                   const World *world, GenreProfile genre,
+                   const World *world, GenreProfile genre, const LevelRegistry *levels,
                    int viewport_w, int viewport_h) {
     (void)viewport_w;
     (void)resources;
@@ -569,6 +627,55 @@ void panel_render(const Panel *p, const Editor *ed, const ResourceStore *resourc
     const int btn_h = 28;
     const int gap = 4;
     const int btn_w = PANEL_WIDTH - margin * 2;
+
+    /* --- Level switcher strip --- must match panel_update()'s geometry
+       (STRIP_H, nav_w, add_w, name_w, and every rect's x/y) exactly, or
+       this is the same class of click-vs-drawn misalignment bug the
+       Tileset/ObjectDef picker rewrites in Phase 1/2 already had to fix
+       once. */
+    {
+        const int STRIP_H = 24;
+        int nav_w = 20;
+        int add_w = 20;
+        int name_w = btn_w - nav_w * 2 - add_w - 6;
+        int mx, my; input_mouse_pos(&mx, &my);
+
+        Rect prev_r = { margin,                          y, nav_w,  STRIP_H };
+        Rect name_r = { margin + nav_w + 2,               y, name_w, STRIP_H };
+        Rect next_r = { margin + nav_w + 2 + name_w + 2,  y, nav_w,  STRIP_H };
+        Rect add_r  = { margin + btn_w - add_w,           y, add_w,  STRIP_H };
+
+        int  count  = levels ? levels->count : 0;
+        int  active = levels ? levels->active_index : -1;
+        bool can_nav = count > 1;
+
+        draw_button(prev_r, "<", false, can_nav);
+        draw_button(next_r, ">", false, can_nav);
+        draw_button(add_r,  "+", false, true);
+
+        const Theme *th = theme_current();
+        renderer_draw_quad((float)name_r.x, (float)name_r.y, (float)name_r.w, (float)name_r.h,
+                           0.13f, 0.13f, 0.15f, 0.92f);
+        draw_box_border(name_r, th->border_r, th->border_g, th->border_b);
+
+        char label[80];
+        if (count == 0) {
+            snprintf(label, sizeof label, "(no levels)");
+        } else {
+            const Level *lv = level_registry_get(levels, active);
+            snprintf(label, sizeof label, "%s (%d/%d)", lv ? lv->name : "?", active + 1, count);
+        }
+        char fit[80];
+        float scale = fit_label(fit, sizeof fit, label, 1.15f, (float)name_r.w - 6.0f);
+        float th2 = text_line_height(scale);
+        float tw = text_measure_width(fit, scale);
+        text_draw((float)name_r.x + ((float)name_r.w - tw) * 0.5f,
+                  (float)name_r.y + ((float)STRIP_H - th2) * 0.5f,
+                  scale, 0.85f, 0.85f, 0.90f, 1.0f, fit);
+
+        (void)mx; (void)my;
+        y += STRIP_H + gap;
+    }
 
     static const EditorMode modes[] = { EDITOR_MODE_PAINT, EDITOR_MODE_PLACE, EDITOR_MODE_SELECT, EDITOR_MODE_SHAPE };
     for (int i = 0; i < 4; i++) {

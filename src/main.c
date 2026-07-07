@@ -13,6 +13,7 @@
 #include "core/log.h"
 #include "core/time.h"
 #include "core/project.h"
+#include "core/level.h"
 #include "core/object_def.h"
 #include "core/playmode.h"
 #include "platform/window.h"
@@ -106,6 +107,17 @@ int main(void) {
     AssetLibrary       assets;  asset_library_init(&assets);
     World              world;   memset(&world,   0, sizeof world);
     Registry           registry;
+    LevelRegistry       levels; level_registry_init(&levels);
+    /* Resolved from levels' active Level each time it changes (see
+       REFRESH_LEVEL_PATHS() below) -- every call site that used to
+       read the fixed WORLD_SAVE_PATH/ENTITY_SAVE_PATH constants now
+       reads these instead. sim.dge/weather.dge stay project-wide
+       fixed paths (SIM_SAVE_PATH/WEATHER_SAVE_PATH), unaffected by
+       which Level is active -- see core/level.h's own doc comment on
+       why SimClock/ResourceStore/WeatherSystem are project-wide, not
+       per-level. */
+    char cur_world_path[300]  = WORLD_SAVE_PATH;
+    char cur_entity_path[300] = ENTITY_SAVE_PATH;
     SpatialGrid        sgrid;   memset(&sgrid,   0, sizeof sgrid);
     Editor             editor;
     Panel              panel;
@@ -153,9 +165,93 @@ int main(void) {
     PlaySnapshot play_snap;
     memset(&play_snap, 0, sizeof play_snap);
 
+    #define REFRESH_LEVEL_PATHS() do {                                        \
+        const Level *_lv = level_registry_active(&levels);                    \
+        if (_lv) {                                                            \
+            snprintf(cur_world_path,  sizeof(cur_world_path),  "%s", _lv->world_path);  \
+            snprintf(cur_entity_path, sizeof(cur_entity_path), "%s", _lv->entity_path); \
+        } else {                                                              \
+            /* Should not normally happen -- level_registry_bootstrap() is    \
+               always called before this in ENTER_EDITOR -- but fall back to  \
+               the pre-Level flat filenames rather than an empty path if it   \
+               somehow does (e.g. LEVEL_MAX==0, which never happens today,    \
+               but this keeps the fallback honest instead of silently         \
+               writing to ""). */                                             \
+            snprintf(cur_world_path,  sizeof(cur_world_path),  "%s", WORLD_SAVE_PATH);  \
+            snprintf(cur_entity_path, sizeof(cur_entity_path), "%s", ENTITY_SAVE_PATH); \
+        }                                                                      \
+    } while(0)
+
+    /* Loads whatever cur_world_path/cur_entity_path currently point at
+       (see REFRESH_LEVEL_PATHS() above) into the live World/Registry/
+       SpatialGrid, re-fitting the panel's resize fields and the camera
+       to the newly active Level's own dimensions. Used both by
+       ENTER_EDITOR (first entry into a project) and by the
+       PANEL_ACTION_LEVEL_PREV/NEXT/ADD handlers (switching to a
+       different Level within an already-open project) — extracted
+       once so both paths can't quietly drift apart on what "loading a
+       level" actually means.
+
+       On a world_create() failure (allocation failure — in practice
+       this never happens; every other OOM path in this codebase treats
+       it the same way) this only aborts the REST OF THIS MACRO's own
+       work via its inner break, not whatever ENTER_EDITOR still has
+       left to do afterward (editor_init, sprites_tab_init, etc.) --
+       unlike the original inline code this replaced, which aborted
+       all of ENTER_EDITOR on the same failure. Accepted as a minor,
+       documented behavior change rather than threading a success/
+       failure flag through a macro purely to preserve exact behavior
+       for a failure mode this codebase doesn't otherwise engineer
+       around. */                                                            \
+    #define LOAD_ACTIVE_LEVEL() do {                                          \
+        if (editor_ready) world_destroy(&world);                              \
+        if (editor_ready) sgrid_destroy(&sgrid);                              \
+        if (!world_create(&world, project.grid_w, project.grid_h)) {         \
+            LOG_ERROR("world_create failed."); break;                         \
+        }                                                                     \
+        world_clear(&world);                                                  \
+        if (!world_load(&world, cur_world_path)) {                           \
+            world_topology_generate(&world, project.topology,                \
+                                     (unsigned int)SDL_GetTicks());          \
+        }                                                                     \
+        registry_init(&registry);                                             \
+        registry_load(&registry, cur_entity_path);                           \
+        sgrid_create(&sgrid, world.width, world.height);                      \
+        { /* rebuild sgrid from registry */                                   \
+          for (int _e = 0; _e < MAX_ENTITIES; _e++) {                        \
+            if (!registry.alive[_e] || !registry.has_transform[_e]) continue;\
+            int _gx = (int)(registry.transform[_e].x + 0.5f);                \
+            int _gy = (int)(registry.transform[_e].y + 0.5f);                \
+            sgrid_insert(&sgrid, (Entity)_e, _gx, _gy);                      \
+          }                                                                   \
+        }                                                                     \
+        panel_init(&panel, world.width, world.height);                       \
+        { float _tw, _th; renderer_get_tile_size(&_tw, &_th);                \
+          camera_center_on_world(&camera, world.width, world.height, _tw, _th); } \
+    } while(0)
+
     #define ENTER_EDITOR() do {                                                \
         if (chdir(project.path) != 0)                                         \
             LOG_WARN("chdir('%s') failed", project.path);                      \
+        /* Phase 3, Part A: Level/Scene system (see core/level.h,              \
+           ENGINE_DESIGN.md §6). A project that already has a                  \
+           levels/manifest.def just loads it. A project that predates          \
+           Levels (or is genuinely brand new) gets bootstrapped with a         \
+           single default "Level 1" -- and if this project has old-style      \
+           flat world.dge/entities.dge files sitting in its root (a           \
+           pre-Phase-3 save), those get migrated into Level 1's own paths     \
+           losslessly rather than silently ignored/orphaned. Either way,      \
+           the manifest is written back so this bootstrap/migration only      \
+           ever runs once per project. */                                     \
+        if (!level_registry_load(&levels, "levels/manifest.def")) {           \
+            level_registry_bootstrap(&levels);                                \
+            level_registry_migrate_legacy(WORLD_SAVE_PATH, ENTITY_SAVE_PATH,   \
+                                          level_registry_active(&levels));     \
+            level_registry_save(&levels, "levels/manifest.def");              \
+        } else {                                                              \
+            level_registry_bootstrap(&levels); /* defensive no-op if count>0 */\
+        }                                                                      \
+        REFRESH_LEVEL_PATHS();                                                \
         if (mode == MODE_PLAY) playmode_snapshot_free(&play_snap);            \
         mode = MODE_EDIT;                                                      \
         if (editor_ready) atlas_destroy(&atlas);                               \
@@ -163,30 +259,9 @@ int main(void) {
         asset_library_destroy(&assets);                                       \
         asset_library_init(&assets);                                          \
         asset_library_load_meta(&assets);                                     \
-        if (editor_ready) world_destroy(&world);                               \
-        if (editor_ready) sgrid_destroy(&sgrid);                               \
-        if (!world_create(&world, project.grid_w, project.grid_h)) {          \
-            LOG_ERROR("world_create failed."); break;                          \
-        }                                                                      \
-        world_clear(&world);                                                   \
-        if (!world_load(&world, WORLD_SAVE_PATH)) {                           \
-            world_topology_generate(&world, project.topology,                 \
-                                     (unsigned int)SDL_GetTicks());           \
-        }                                                                      \
-        registry_init(&registry);                                              \
-        registry_load(&registry, ENTITY_SAVE_PATH);                           \
-        sgrid_create(&sgrid, world.width, world.height);                       \
-        { /* rebuild sgrid from registry */                                    \
-          for (int _e = 0; _e < MAX_ENTITIES; _e++) {                         \
-            if (!registry.alive[_e] || !registry.has_transform[_e]) continue; \
-            int _gx = (int)(registry.transform[_e].x + 0.5f);                 \
-            int _gy = (int)(registry.transform[_e].y + 0.5f);                 \
-            sgrid_insert(&sgrid, (Entity)_e, _gx, _gy);                       \
-          }                                                                    \
-        }                           \
+        LOAD_ACTIVE_LEVEL();                                                   \
         editor_init(&editor);                                                  \
         shape_pane_init(&shape_pane);                                          \
-        panel_init(&panel, project.grid_w, project.grid_h);                   \
         simclock_init(&sim_clock);                                             \
         resource_store_init(&resources);                                       \
         simulation_load(&sim_clock, &resources, SIM_SAVE_PATH);               \
@@ -204,8 +279,9 @@ int main(void) {
         settings_tab_init(&settings_tab, &project, &editor_settings);           \
         tabbar_init(&tabbar);                                                  \
         editor_ready = true;                                                   \
-        LOG_INFO("Editor ready: '%s' (%dx%d)", project.name,                  \
-                 project.grid_w, project.grid_h);                             \
+        LOG_INFO("Editor ready: '%s' (%dx%d) -- level '%s'", project.name,     \
+                 project.grid_w, project.grid_h,                              \
+                 level_registry_active(&levels) ? level_registry_active(&levels)->name : "?"); \
     } while(0)
 
     #define SGRID_REBUILD() do {                                               \
@@ -289,16 +365,17 @@ int main(void) {
            on its own. */
         if (mode == MODE_EDIT && !input_keyboard_consumed()) {
             if (input_key_pressed(SDL_SCANCODE_F5)) {
-                world_save(&world, WORLD_SAVE_PATH);
-                registry_save(&registry, ENTITY_SAVE_PATH);
+                world_save(&world, cur_world_path);
+                registry_save(&registry, cur_entity_path);
                 simulation_save(&sim_clock, &resources, SIM_SAVE_PATH);
                 weather_save(&weather, WEATHER_SAVE_PATH);
+                level_registry_save(&levels, "levels/manifest.def");
                 editor_settings_save(&editor_settings);
                 LOG_INFO("Project saved.");
             }
             if (input_key_pressed(SDL_SCANCODE_F9)) {
-                world_load(&world, WORLD_SAVE_PATH);
-                registry_load(&registry, ENTITY_SAVE_PATH);
+                world_load(&world, cur_world_path);
+                registry_load(&registry, cur_entity_path);
                 simulation_load(&sim_clock, &resources, SIM_SAVE_PATH);
                 weather_load(&weather, WEATHER_SAVE_PATH);
                 editor.selected = ENTITY_HANDLE_NULL;
@@ -436,7 +513,7 @@ int main(void) {
         if (cur_tab == TAB_WORLD && mode == MODE_EDIT) {
             PanelAction pa;
             panel_update(&panel, &editor, &resources, &weather,
-                        &obj_registry, &sprites_tab, &atlas, &world, project.genre, vw, vh, &pa);
+                        &obj_registry, &sprites_tab, &atlas, &world, project.genre, &levels, vw, vh, &pa);
             switch (pa.type) {
                 case PANEL_ACTION_NEW:
                     world_clear(&world); registry_init(&registry);
@@ -448,13 +525,13 @@ int main(void) {
                     editor.selected = ENTITY_HANDLE_NULL;
                     SGRID_REBUILD(); break;
                 case PANEL_ACTION_SAVE:
-                    world_save(&world, WORLD_SAVE_PATH);
-                    registry_save(&registry, ENTITY_SAVE_PATH);
+                    world_save(&world, cur_world_path);
+                    registry_save(&registry, cur_entity_path);
                     simulation_save(&sim_clock, &resources, SIM_SAVE_PATH);
                     weather_save(&weather, WEATHER_SAVE_PATH); break;
                 case PANEL_ACTION_LOAD:
-                    world_load(&world, WORLD_SAVE_PATH);
-                    registry_load(&registry, ENTITY_SAVE_PATH);
+                    world_load(&world, cur_world_path);
+                    registry_load(&registry, cur_entity_path);
                     simulation_load(&sim_clock, &resources, SIM_SAVE_PATH);
                     weather_load(&weather, WEATHER_SAVE_PATH);
                     editor.selected = ENTITY_HANDLE_NULL;
@@ -469,6 +546,65 @@ int main(void) {
                     weather_set_enabled(&weather, !weather.enabled); break;
                 case PANEL_ACTION_WEATHER_SET:
                     weather_set_type(&weather, (WeatherType)pa.weather_type); break;
+                case PANEL_ACTION_LEVEL_PREV:
+                case PANEL_ACTION_LEVEL_NEXT: {
+                    /* Persist the level we're leaving before switching --
+                       same "don't lose edits on navigation" reasoning as
+                       every other save point in this file. Manifest isn't
+                       re-saved here (active_index is about to change
+                       anyway and gets saved once below), just the
+                       world/entity data for the level itself. */
+                    world_save(&world, cur_world_path);
+                    registry_save(&registry, cur_entity_path);
+
+                    int n = levels.count;
+                    int next_idx = levels.active_index;
+                    if (n > 1) {
+                        next_idx = (pa.type == PANEL_ACTION_LEVEL_NEXT)
+                                 ? (levels.active_index + 1) % n
+                                 : (levels.active_index - 1 + n) % n;
+                    }
+                    level_registry_set_active(&levels, next_idx);
+                    REFRESH_LEVEL_PATHS();
+                    LOAD_ACTIVE_LEVEL();
+                    level_registry_save(&levels, "levels/manifest.def");
+                    editor.selected = ENTITY_HANDLE_NULL;
+                    LOG_INFO("Switched to level '%s' (%d/%d)",
+                             level_registry_active(&levels)->name, next_idx + 1, n);
+                    break;
+                }
+                case PANEL_ACTION_LEVEL_ADD: {
+                    /* Persist the level we're leaving, same as PREV/NEXT
+                       above -- adding a new level still navigates away
+                       from whichever one is currently active. */
+                    world_save(&world, cur_world_path);
+                    registry_save(&registry, cur_entity_path);
+
+                    char name[LEVEL_NAME_MAX];
+                    snprintf(name, sizeof(name), "Level %d", levels.count + 1);
+                    int new_idx = level_registry_add(&levels, name);
+                    if (new_idx >= 0) {
+                        level_registry_set_active(&levels, new_idx);
+                        REFRESH_LEVEL_PATHS();
+                        /* No file exists yet at the new level's paths --
+                           LOAD_ACTIVE_LEVEL()'s own world_load() call
+                           will fail (expected) and fall through to
+                           world_topology_generate(), the same
+                           "no save yet -> generate fresh" path a
+                           brand-new project's very first ENTER_EDITOR
+                           already goes through. New level starts as a
+                           plain rectangle at the project's default grid
+                           size -- shaping/resizing it further is a
+                           SHAPE-mode/Settings job once it's active, not
+                           something "+" needs to ask up front. */
+                        LOAD_ACTIVE_LEVEL();
+                        level_registry_save(&levels, "levels/manifest.def");
+                        editor.selected = ENTITY_HANDLE_NULL;
+                        LOG_INFO("Added and switched to level '%s' (%d/%d)",
+                                 name, new_idx + 1, levels.count);
+                    }
+                    break;
+                }
                 default: break;
             }
 
@@ -557,10 +693,11 @@ int main(void) {
                 /* Same persistence F5 does, so nothing placed/painted
                    this session is lost just because the project is
                    closing rather than the whole app quitting. */
-                world_save(&world, WORLD_SAVE_PATH);
-                registry_save(&registry, ENTITY_SAVE_PATH);
+                world_save(&world, cur_world_path);
+                registry_save(&registry, cur_entity_path);
                 simulation_save(&sim_clock, &resources, SIM_SAVE_PATH);
                 weather_save(&weather, WEATHER_SAVE_PATH);
+                level_registry_save(&levels, "levels/manifest.def");
                 editor_settings_save(&editor_settings);
                 LOG_INFO("Project '%s' closed -> back to Project Manager", project.name);
                 project_manager_init(&pm);
@@ -593,7 +730,7 @@ int main(void) {
                       project.genre, vw, vh, world.width, world.height,
                       panel_effective_width(&panel) + 10);
             panel_render(&panel, &editor, &resources, &weather, &obj_registry,
-                         &atlas, &sprites_tab, &world, project.genre, vw, vh);
+                         &atlas, &sprites_tab, &world, project.genre, &levels, vw, vh);
             minimap_render(&world, &registry, &camera, vw, vh);
             if (editor.mode == EDITOR_MODE_SHAPE)
                 shape_pane_render(&shape_pane, &world, vw, vh);

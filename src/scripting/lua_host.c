@@ -185,14 +185,18 @@ static int dge_api_destroy(lua_State *L) {
     return 0;
 }
 
-/* dge.get_resource(kind) -> int */
+/* dge.get_resource(kind) -> int
+   Phase 2B: kind is any resource name a project uses, not just "wood"/
+   "stone" — resource_store_get() (simulation.h) handles "have I seen
+   this name" itself, so this function has no branching left at all;
+   it works for whatever names the project's own harvest/construction/
+   scripts have been using, unchanged from a Lua script's point of
+   view (the Lua-facing signature never mentioned wood/stone anyway,
+   it always just took a string). */
 static int dge_api_get_resource(lua_State *L) {
     LuaHost *h       = get_host(L);
     const char *kind = luaL_checkstring(L, 1);
-    if (!h->resources) { lua_pushinteger(L, 0); return 1; }
-    int amount = (strcmp(kind, "stone") == 0)
-               ? h->resources->stone
-               : h->resources->wood;
+    int amount = h->resources ? resource_store_get(h->resources, kind) : 0;
     lua_pushinteger(L, amount);
     return 1;
 }
@@ -202,11 +206,7 @@ static int dge_api_add_resource(lua_State *L) {
     LuaHost *h       = get_host(L);
     const char *kind = luaL_checkstring(L, 1);
     int amount       = (int)luaL_checkinteger(L, 2);
-    if (!h->resources) return 0;
-    if (strcmp(kind, "stone") == 0)
-        resource_store_add_stone(h->resources, amount);
-    else
-        resource_store_add_wood(h->resources, amount);
+    if (h->resources) resource_store_add(h->resources, kind, amount);
     return 0;
 }
 

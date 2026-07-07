@@ -45,23 +45,32 @@ Entity objdef_spawn_instance(Registry *reg, const ObjectDef *def, int sprite_id,
         entity_add_health(reg, e, (HealthComponent){hp, hp});
     }
 
+    /* "drops" now accepts any resource name — Phase 2B retired the old
+       ResourceKind enum that limited this to "wood"/"stone" specifically.
+       A project can name its own resources ("gold", "mana", whatever)
+       and this just carries that name straight into the
+       ResourceComponent; resource_store_add() (simulation.h) handles
+       "have I seen this name before" itself when the entity is
+       eventually harvested. */
     const ObjectProperty *drops = find_prop(def, "drops", PROP_STRING);
-    if (drops) {
-        ResourceKind kind;
-        bool recognized = true;
-        if (strcmp(drops->value.as_string, "wood") == 0)       kind = RESOURCE_WOOD;
-        else if (strcmp(drops->value.as_string, "stone") == 0) kind = RESOURCE_STONE;
-        else { recognized = false; kind = RESOURCE_WOOD; }
-
-        if (recognized) {
-            const ObjectProperty *yield = find_prop(def, "yield", PROP_INT);
-            int amount = yield ? yield->value.as_int : 10;
-            entity_add_resource(reg, e, (ResourceComponent){kind, amount});
-        } else {
-            LOG_WARN("objdef_spawn_instance: '%s' has drops=\"%s\" — only "
-                     "\"wood\"/\"stone\" are recognized, ignoring",
-                     def->name, drops->value.as_string);
-        }
+    if (drops && drops->value.as_string[0]) {
+        const ObjectProperty *yield = find_prop(def, "yield", PROP_INT);
+        int amount = yield ? yield->value.as_int : 10;
+        ResourceComponent rc;
+        /* Manual bounded copy instead of snprintf("%s", ...) — the
+           source (an ObjectProperty string, up to 63 bytes) can be
+           wider than RESOURCE_NAME_MAX (32), and truncating via
+           snprintf here is completely safe (it always NUL-terminates
+           within the given size) but gcc's -Wformat-truncation can't
+           see that at compile time, since it can't know the source
+           string's actual runtime length. Same reasoning/pattern as
+           tileset_strcpy() in world/tileset.h. */
+        int ki = 0;
+        for (; ki + 1 < (int)sizeof(rc.kind) && drops->value.as_string[ki]; ki++)
+            rc.kind[ki] = drops->value.as_string[ki];
+        rc.kind[ki] = '\0';
+        rc.yield_per_hit = amount;
+        entity_add_resource(reg, e, rc);
     }
 
     return e;

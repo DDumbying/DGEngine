@@ -80,9 +80,26 @@ void ui_render(const ResourceStore *resources,
         snprintf(tile, sizeof tile, "T:--");
 
     if (genre == GENRE_SANDBOX_SIM) {
-        /* Resources */
-        char res[64];
-        snprintf(res, sizeof res, "W:%d  S:%d", resources->wood, resources->stone);
+        /* Resources — Phase 2B: no more fixed W:/S: readout, since
+           ResourceKind (and the fixed wood/stone it implied) retired.
+           Show whatever the project's ResourceStore actually has,
+           first letter of each name (mirrors the old "W:"/"S:" shorthand
+           style) so the status line stays compact even with several
+           resource kinds defined. A project with zero resources yet
+           (a brand new sandbox-sim, or one whose entities haven't
+           harvested anything) shows nothing here rather than a
+           stale/fake placeholder. */
+        char res[128];
+        int  off = 0;
+        res[0] = '\0';
+        for (int i = 0; i < resources->count && off < (int)sizeof(res) - 24; i++) {
+            int n = snprintf(res + off, sizeof(res) - (size_t)off, "%s%c:%d",
+                              i > 0 ? "  " : "",
+                              resources->entries[i].name[0] ? resources->entries[i].name[0] : '?',
+                              resources->entries[i].amount);
+            if (n > 0) off += n;
+        }
+        if (off == 0) snprintf(res, sizeof res, "no resources yet");
 
         /* Time */
         char tim[32];
