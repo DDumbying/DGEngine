@@ -5,16 +5,12 @@
 Built because understanding a thing properly means building it yourself.
 This is not competing with Unity or Unreal. It is a focused tool for one specific genre: strategy, management, sandbox, and world-simulation games (think RimWorld, Factorio, Banished).
 
----
-
 ## Philosophy
 
 > Understand everything. Abstract only when necessary.
 
 Every system is written to be readable. No magic. No hidden layers.
 If something breaks, you should be able to trace it to a single function.
-
----
 
 ## Current State
 
@@ -62,8 +58,6 @@ Controls:
   (not per-frame). Fine at current entity counts; revisit with a spatial
   index if Simulation/AI phases push entity counts high enough to matter.
 
----
-
 ## Building
 
 Dependencies: `gcc`, `SDL2`, `OpenGL`.
@@ -86,8 +80,6 @@ make test
 ```
 
 GLAD is vendored in `external/glad/`. No other external setup needed.
-
----
 
 ## Project Structure
 
@@ -154,8 +146,6 @@ DGEngine/
 └── README.md
 ```
 
----
-
 ## Technology
 
 | Category | Choice |
@@ -173,14 +163,10 @@ quad). ImGui is *not* planned anymore: Phase 4 (Editor) shipped without
 it — see "Known limitations" above for why — and nothing since has made
 a strong enough case to reconsider.
 
----
-
 ## Related Projects
 
 - [Dchess](https://github.com/DDumbying/Dchess) — Dumb Chess
 - [BTorrent](https://github.com/DDumbying/BTorrent) — BitTorrent client
 - [DDumbying org site](https://ddumbying.vercel.app)
-
----
 
 > Making dumb things is how you eventually make smart things.
