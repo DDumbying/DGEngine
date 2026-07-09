@@ -14,6 +14,14 @@
 
 static Theme s_theme;
 static bool  s_initialized = false;
+static char  s_engine_root[512] = ".";
+
+void theme_set_engine_root(const char *path) {
+    if (path) {
+        strncpy(s_engine_root, path, sizeof(s_engine_root) - 1);
+        s_engine_root[sizeof(s_engine_root) - 1] = '\0';
+    }
+}
 
 void theme_reset_default(void) {
     memset(&s_theme, 0, sizeof s_theme);
@@ -110,7 +118,10 @@ bool theme_load(const char *path) {
 
 int theme_list_available(char out_paths[][256], int max_count) {
     int count = 0;
-    DIR *d = opendir("themes");
+    char themes_dir[1024];
+    snprintf(themes_dir, sizeof(themes_dir), "%s/themes", s_engine_root);
+    
+    DIR *d = opendir(themes_dir);
     if (!d) return 0;
 
     struct dirent *entry;
@@ -118,7 +129,7 @@ int theme_list_available(char out_paths[][256], int max_count) {
         const char *name = entry->d_name;
         size_t len = strlen(name);
         if (len > 6 && strcmp(name + len - 6, ".theme") == 0) {
-            snprintf(out_paths[count], 256, "themes/%s", name);
+            snprintf(out_paths[count], 256, "%s/themes/%s", s_engine_root, name);
             count++;
         }
     }

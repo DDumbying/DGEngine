@@ -8,7 +8,7 @@
 #include "../renderer/renderer.h"
 #include "../core/log.h"
 #include "text.h"
-#include "tabbar.h"
+#include "menubar.h"
 #include "layout.h"
 
 /* Layout */
@@ -21,7 +21,7 @@
 #define SCALE_LBL  1.5f
 #define SCALE_BODY 1.5f
 #define SCALE_SM   1.3f
-#define CONTENT_Y  ((float)TABBAR_H)
+#define CONTENT_Y  ((float)TOP_BAR_H)
 
 static bool hittest(float x,float y,float w,float h,int mx,int my){
     return (float)mx>=x&&(float)mx<x+w&&(float)my>=y&&(float)my<y+h;

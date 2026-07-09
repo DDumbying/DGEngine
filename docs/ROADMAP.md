@@ -393,7 +393,7 @@ Now that Phase 1–2 remove the reasons the sidebar got cluttered:
   reads from it), so that half of the original bullet was already true
   before this phase started.
 
-### Phase 5 — Win/lose/goal system
+### Phase 5 — Win/lose/goal system ✅ DONE
 The smallest addition that turns a sandbox into an actual game.
 
 - `rules.def` gains win/lose condition scripts (Lua, evaluated each
@@ -403,13 +403,17 @@ The smallest addition that turns a sandbox into an actual game.
   data can define what 'winning' means" works end to end, not building
   a complete objectives/scoring system.
 
-### Phase 6 — Runtime build (not yet scoped in detail)
+### Phase 6 — Runtime build ✅ DONE
 A real, even if crude, path from "finished project" to "standalone
 runnable thing." Strip editor UI, load one project's data, run it. This
 is the actual test of whether Phases 1–5 produced an engine or just a
 cleaner editor. This is also where Level system Part B
 (`LevelTransitionComponent`, a player actually walking between maps)
 belongs — a runtime concept needs a runtime to run in.
+
+*Completed:* `runtime_main.c` added and hooked up in Makefile to build 
+`bin/dgruntime` alongside `dgengine`. `LevelTransitionComponent` added to 
+ECS for stepping between maps during gameplay.
 
 ### Phase 7+ — Not yet scoped
 Multi-layer tiles, audio, in-game UI, per-level camera drive modes.
@@ -435,8 +439,9 @@ Named explicitly so it's clear what's *not* being rebuilt:
 
 ## 6. Current status
 
-Phases 1–4 are complete (Tileset-as-data; PrefabKind/BuildingKind/
-ResourceKind retired into ObjectDef; the Level/Scene system's Part A;
-Sidebar cleanup — the resize state consolidation). Phase 5 (Win/lose/
-goal system) is next — the smallest addition that turns a sandbox into
-an actual game.
+Phases 1–6 are complete. The project has successfully migrated from a monolithic
+editor-only sandbox to a cleanly separated architecture with a standalone
+runtime binary (`dgruntime`) capable of loading a project's data and 
+running it natively without the editor UI. 
+
+Phase 7 (Multi-layer tiles, audio, in-game UI) is the next frontier.

@@ -86,8 +86,8 @@ const char *editor_mode_name(EditorMode m);
    also paint/place/select on whatever world tile happens to be behind
    it. Pass 0 to disable this (e.g. from a test harness with no panel).
 
-   ui_top_margin is the same idea for the tab bar + status row above
-   the World view (TABBAR_H + STATUS_BAR_H, see ui/tabbar.h and ui/ui.h)
+   ui_top_margin is the same idea for the menu bar above
+   the World view (TOP_BAR_H, see ui/menubar.h)
    — any mouse position with y < ui_top_margin is likewise treated as
    "no tile hovered". Without this, clicking a tab (or anything else in
    that strip) also paints/places/selects on whatever world tile

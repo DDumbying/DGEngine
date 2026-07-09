@@ -104,4 +104,21 @@ void lua_host_clear_cache(LuaHost *h);
    script path + compile state (not once per call). */
 bool lua_host_call_behavior(LuaHost *h, Entity e, const char *event);
 
+/* Condition evaluation (Phase 5 — Win/Lose) ------------------------- */
+
+/* Load and execute a standalone Lua script file (not entity-bound).
+   The script must define a function named `check()` that returns true
+   or false. Example:
+
+       -- scripts/win.lua
+       function check()
+           return dge.get_resource("wood") >= 100
+       end
+
+   Returns true  if the script's check() returned a truthy value.
+   Returns false if: the file is missing, it failed to compile,
+                     check() is not defined, or check() returned
+                     false/nil. Uses the same cache as entity behaviors. */
+bool lua_host_eval_condition(LuaHost *h, const char *script_path);
+
 #endif /* DGE_LUA_HOST_H */

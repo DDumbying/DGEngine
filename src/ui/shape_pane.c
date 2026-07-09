@@ -6,9 +6,9 @@
 #include "../platform/input.h"
 #include "../renderer/renderer.h"
 #include "text.h"
-#include "tabbar.h"
+#include "menubar.h"
 
-#define CONTENT_Y     ((float)TABBAR_H)
+#define CONTENT_Y     ((float)TOP_BAR_H)
 #define HEADER_H       28.0f
 #define MIN_CELL_PX     4.0f
 #define MAX_CELL_PX    48.0f

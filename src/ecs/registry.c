@@ -37,6 +37,7 @@ void entity_destroy(Registry *r, Entity e) {
     r->has_task[e]      = false;
     r->has_construction[e] = false;
     r->has_definition[e]   = false;
+    r->has_level_transition[e] = false;
     r->generation[e]++;
 
     r->free_list[r->free_count++] = e;
@@ -144,11 +145,25 @@ DefinitionComponent *entity_get_definition(Registry *r, Entity e) {
     return &r->definition[e];
 }
 
+void entity_add_level_transition(Registry *r, Entity e, LevelTransitionComponent lt) {
+    if (!entity_alive(r, e)) return;
+    r->level_transition[e] = lt;
+    r->has_level_transition[e] = true;
+}
+
+LevelTransitionComponent *entity_get_level_transition(Registry *r, Entity e) {
+    if (!entity_alive(r, e) || !r->has_level_transition[e]) return NULL;
+    return &r->level_transition[e];
+}
+
 /* ---------------------------------------------------------------------
    Save / load — see the format comment in registry.h. */
 
 #define DGEE_MAGIC   "DGEE"
-#define DGEE_VERSION 9u   /* Phase 2B (ObjectDef consolidation, resources):
+#define DGEE_VERSION 10u  /* Phase 6 Part B (Level Transitions):
+                             mask changed to uint16, added
+                             LevelTransitionComponent.
+                             Version 9 was Phase 2B (ObjectDef consolidation):
                              ResourceKind retired -- ResourceComponent.kind
                              is now a RESOURCE_NAME_MAX-byte name block
                              instead of a single enum byte.
@@ -172,6 +187,7 @@ DefinitionComponent *entity_get_definition(Registry *r, Entity e) {
 #define MASK_TASK          (1u << 5)
 #define MASK_CONSTRUCTION  (1u << 6)
 #define MASK_DEFINITION    (1u << 7)
+#define MASK_LEVEL_TRANSITION (1u << 8)
 
 bool registry_save(const Registry *r, const char *path) {
     FILE *f = fopen(path, "wb");
@@ -193,7 +209,7 @@ bool registry_save(const Registry *r, const char *path) {
     for (Entity e = 0; ok && e < (Entity)MAX_ENTITIES; e++) {
         if (!r->alive[e]) continue;
 
-        unsigned char mask = 0;
+        uint16_t mask = 0;
         if (r->has_transform[e])  mask |= MASK_TRANSFORM;
         if (r->has_renderable[e]) mask |= MASK_RENDERABLE;
         if (r->has_health[e])     mask |= MASK_HEALTH;
@@ -202,7 +218,8 @@ bool registry_save(const Registry *r, const char *path) {
         if (r->has_task[e])       mask |= MASK_TASK;
         if (r->has_construction[e]) mask |= MASK_CONSTRUCTION;
         if (r->has_definition[e])   mask |= MASK_DEFINITION;
-        ok &= fwrite(&mask, 1, 1, f) == 1;
+        if (r->has_level_transition[e]) mask |= MASK_LEVEL_TRANSITION;
+        ok &= fwrite(&mask, sizeof(mask), 1, f) == 1;
 
         if (ok && (mask & MASK_TRANSFORM)) {
             const TransformComponent *t = &r->transform[e];
@@ -251,6 +268,11 @@ bool registry_save(const Registry *r, const char *path) {
         if (ok && (mask & MASK_DEFINITION)) {
             const DefinitionComponent *d = &r->definition[e];
             ok &= fwrite(d->def_name, 1, OBJDEF_NAME_MAX, f) == OBJDEF_NAME_MAX;
+        }
+        if (ok && (mask & MASK_LEVEL_TRANSITION)) {
+            const LevelTransitionComponent *lt = &r->level_transition[e];
+            ok &= fwrite(lt->target_level, 1, LEVEL_NAME_MAX, f) == LEVEL_NAME_MAX;
+            ok &= fwrite(lt->target_marker, 1, LEVEL_NAME_MAX, f) == LEVEL_NAME_MAX;
         }
     }
 
@@ -304,8 +326,14 @@ bool registry_load(Registry *r, const char *path) {
     registry_init(loaded);
 
     for (unsigned int i = 0; ok && i < count; i++) {
-        unsigned char mask;
-        if (fread(&mask, 1, 1, f) != 1) { ok = false; break; }
+        uint16_t mask = 0;
+        if (version >= 10) {
+            if (fread(&mask, sizeof(mask), 1, f) != 1) { ok = false; break; }
+        } else {
+            unsigned char old_mask;
+            if (fread(&old_mask, 1, 1, f) != 1) { ok = false; break; }
+            mask = old_mask;
+        }
 
         Entity e = entity_create(loaded);
         if (e == ENTITY_NULL) { ok = false; break; }
@@ -452,6 +480,15 @@ bool registry_load(Registry *r, const char *path) {
             if (fread(d.def_name, 1, OBJDEF_NAME_MAX, f) != OBJDEF_NAME_MAX) { ok = false; break; }
             d.def_name[OBJDEF_NAME_MAX - 1] = '\0'; /* guarantee NUL-termination regardless of file contents */
             entity_add_definition(loaded, e, d);
+        }
+        if ((mask & MASK_LEVEL_TRANSITION)) {
+            LevelTransitionComponent lt;
+            memset(&lt, 0, sizeof(lt));
+            if (fread(lt.target_level, 1, LEVEL_NAME_MAX, f) != LEVEL_NAME_MAX) { ok = false; break; }
+            if (fread(lt.target_marker, 1, LEVEL_NAME_MAX, f) != LEVEL_NAME_MAX) { ok = false; break; }
+            lt.target_level[LEVEL_NAME_MAX - 1] = '\0';
+            lt.target_marker[LEVEL_NAME_MAX - 1] = '\0';
+            entity_add_level_transition(loaded, e, lt);
         }
     }
     fclose(f);

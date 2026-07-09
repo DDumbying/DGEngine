@@ -13,23 +13,39 @@ INCLUDES = -Iexternal/glad/include -Iexternal/stb -Isrc -I/usr/include/lua5.4
 
 LIBS     = -lSDL2 -lGL -lm -llua5.4
 
-SRC     = $(shell find src external -name "*.c")
-OUT     = bin/dgengine
+SRC_ALL     = $(shell find src external -name "*.c")
+
+# The editor gets everything except runtime_main.c
+SRC_EDITOR  = $(filter-out src/runtime_main.c, $(SRC_ALL))
+
+# The runtime gets core engine + shared UI (fonts/text/theme) + runtime_main.c
+SRC_CORE    = $(filter-out src/main.c src/runtime_main.c src/editor/% src/ui/%, $(SRC_ALL))
+SRC_UI_COMM = src/ui/font.c src/ui/font_atlas.c src/ui/text.c src/ui/theme.c src/ui/left_pane.c src/ui/inspector_pane.c
+SRC_RUNTIME = $(SRC_CORE) $(SRC_UI_COMM) src/runtime_main.c
+
+OUT_EDITOR  = bin/dgengine
+OUT_RUNTIME = bin/dgruntime
 
 CFLAGS_RELEASE = $(STD) $(WARN) -O2
 CFLAGS_DEBUG   = $(STD) $(WARN) -g -O0 -fsanitize=address,undefined
 
-all: $(OUT)
+all: $(OUT_EDITOR) $(OUT_RUNTIME)
 
-$(OUT): $(SRC)
+$(OUT_EDITOR): $(SRC_EDITOR)
 	@mkdir -p bin
-	$(CC) $(SRC) $(CFLAGS_RELEASE) $(INCLUDES) $(LIBS) -o $(OUT)
-	@echo "Build OK -> $(OUT)"
+	$(CC) $(SRC_EDITOR) $(CFLAGS_RELEASE) $(INCLUDES) $(LIBS) -o $(OUT_EDITOR)
+	@echo "Build Editor OK -> $(OUT_EDITOR)"
+
+$(OUT_RUNTIME): $(SRC_RUNTIME)
+	@mkdir -p bin
+	$(CC) $(SRC_RUNTIME) $(CFLAGS_RELEASE) $(INCLUDES) $(LIBS) -o $(OUT_RUNTIME)
+	@echo "Build Runtime OK -> $(OUT_RUNTIME)"
 
 debug:
 	@mkdir -p bin
-	$(CC) $(SRC) $(CFLAGS_DEBUG) $(INCLUDES) $(LIBS) -o $(OUT)
-	@echo "Debug build OK -> $(OUT)"
+	$(CC) $(SRC_EDITOR) $(CFLAGS_DEBUG) $(INCLUDES) $(LIBS) -o $(OUT_EDITOR)
+	$(CC) $(SRC_RUNTIME) $(CFLAGS_DEBUG) $(INCLUDES) $(LIBS) -o $(OUT_RUNTIME)
+	@echo "Debug build OK -> $(OUT_EDITOR) & $(OUT_RUNTIME)"
 
 # Tests link only the .c files they actually need (no SDL2/GL), so they
 # build and run anywhere — useful in CI or anywhere without a display.
@@ -89,7 +105,7 @@ $(TEST_DIR)/test_level: tests/test_level.c src/core/level.c src/core/log.c
 	$(CC) $(CFLAGS_DEBUG) $(INCLUDES) $^ -o $@ -lm
 
 clean:
-	rm -f $(OUT)
+	rm -f $(OUT_EDITOR) $(OUT_RUNTIME)
 	rm -rf $(TEST_DIR)
 
 .PHONY: all debug test clean

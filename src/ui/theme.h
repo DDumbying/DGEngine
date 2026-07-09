@@ -57,6 +57,11 @@ typedef struct {
    need a NULL check. */
 const Theme *theme_current(void);
 
+/* Set the base directory for the engine (where the themes/ folder lives).
+   Crucial because the editor chdirs into the project folder, which breaks
+   relative paths like "themes/". */
+void theme_set_engine_root(const char *path);
+
 /* Load a .theme file and make it the active theme. Returns false (and
    leaves the current theme unchanged) if the file can't be read — the
    engine should never end up with no theme at all just because a file

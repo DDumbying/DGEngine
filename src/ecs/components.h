@@ -161,4 +161,13 @@ typedef struct {
     char def_name[OBJDEF_NAME_MAX];
 } DefinitionComponent;
 
+/*  Phase 6 Part B: Level Transition. When an entity steps on a tile
+    containing an entity with this component, the engine loads the
+    target level. */
+#define LEVEL_NAME_MAX 64
+typedef struct {
+    char target_level[LEVEL_NAME_MAX];
+    char target_marker[LEVEL_NAME_MAX];
+} LevelTransitionComponent;
+
 #endif /* DGE_COMPONENTS_H */

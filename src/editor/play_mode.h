@@ -21,6 +21,8 @@ typedef enum {
     PLAY_MODE_EDIT = 0,   /* editor is active */
     PLAY_MODE_PLAY,       /* game is running, editor hidden */
     PLAY_MODE_PAUSED,     /* game paused mid-play (still hides editor) */
+    PLAY_MODE_WON,        /* game ended: win condition triggered */
+    PLAY_MODE_LOST,       /* game ended: lose condition triggered */
 } PlayModeState;
 
 typedef struct {
@@ -28,6 +30,9 @@ typedef struct {
 
     /* Whether to show a brief "PLAY MODE" overlay on first entering play */
     float overlay_timer;  /* counts down from 2.0 seconds, then 0 */
+
+    /* Phase 5: end-state message shown on the win/lose overlay */
+    char end_message[128];
 } PlayMode;
 
 static inline void play_mode_init(PlayMode *pm) {
@@ -37,6 +42,10 @@ static inline void play_mode_init(PlayMode *pm) {
 
 static inline bool play_mode_is_playing(const PlayMode *pm) {
     return pm->state == PLAY_MODE_PLAY || pm->state == PLAY_MODE_PAUSED;
+}
+
+static inline bool play_mode_ended(const PlayMode *pm) {
+    return pm->state == PLAY_MODE_WON || pm->state == PLAY_MODE_LOST;
 }
 
 static inline bool play_mode_is_editing(const PlayMode *pm) {

@@ -8,7 +8,7 @@
 #include "../platform/input.h"
 #include "../renderer/renderer.h"
 #include "text.h"
-#include "tabbar.h"
+#include "menubar.h"
 #include "layout.h"
 #include "theme.h"
 
@@ -37,7 +37,7 @@
 #define SCALE_LBL  1.5f
 #define SCALE_SM   1.3f
 #define SCALE_HEAD 1.8f
-#define CONTENT_Y  ((float)TABBAR_H)
+#define CONTENT_Y  ((float)TOP_BAR_H)
 
 static const char *SECTION_TITLES[SETTINGS_SEC_COUNT] = {
     "GENERAL",
@@ -436,7 +436,18 @@ static void render_appearance(const SettingsTab *st, int mx, int my) {
             /* Display just the filename, not the full themes/ path */
             const char *base = paths[i];
             for (const char *p = paths[i]; *p; p++) if (*p=='/'||*p=='\\') base = p+1;
-            label = base;
+            
+            static char display_name[64];
+            strncpy(display_name, base, sizeof(display_name) - 1);
+            display_name[sizeof(display_name) - 1] = '\0';
+            char *dot = strrchr(display_name, '.');
+            if (dot) *dot = '\0';
+            
+            /* Capitalize it so it looks nice in the button */
+            for (char *p = display_name; *p; p++) {
+                if (*p >= 'a' && *p <= 'z') *p -= 32;
+            }
+            label = display_name;
         }
         draw_btn(bx, by, tw, BTN_H, label, active, pr, pg, pb, mx, my);
     }

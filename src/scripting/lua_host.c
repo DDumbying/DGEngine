@@ -429,3 +429,42 @@ bool lua_host_call_behavior(LuaHost *h, Entity e, const char *event) {
     lua_pop(L, 1); /* pop env */
     return true;
 }
+
+/* -------------------------------------------------------------------
+   Condition evaluation (Phase 5 — Win/Lose)
+
+   Reuses the same cache_find/cache_load machinery as entity behaviors,
+   but calls a function named "check" with no SELF and reads its return
+   value as a boolean.                                                  */
+
+bool lua_host_eval_condition(LuaHost *h, const char *script_path) {
+    if (!h || !script_path || !script_path[0]) return false;
+
+    /* Load or fetch from cache. */
+    CacheEntry *ce = cache_find(h, script_path);
+    if (!ce) ce = cache_load(h, script_path);
+    if (!ce || ce->state == CACHE_ERROR) return false;
+
+    lua_State *L = h->L;
+
+    /* Push the env table, then look up check(). */
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ce->env_ref);
+    lua_getfield(L, -1, "check");
+
+    if (!lua_isfunction(L, -1)) {
+        lua_pop(L, 2); /* nil + env */
+        return false;
+    }
+
+    /* Call check() with no args, expecting one return value. */
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+        LOG_ERROR("Lua runtime error in '%s::check': %s",
+                  script_path, lua_tostring(L, -1));
+        lua_pop(L, 2); /* error + env */
+        return false;
+    }
+
+    bool result = lua_toboolean(L, -1);
+    lua_pop(L, 2); /* result + env */
+    return result;
+}

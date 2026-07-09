@@ -9,7 +9,7 @@
 #include "../renderer/renderer.h"
 #include "../core/log.h"
 #include "text.h"
-#include "tabbar.h"
+#include "menubar.h"
 #include "layout.h"
 
 /* -----------------------------------------------------------------------
@@ -26,7 +26,7 @@
 #define SCALE_SMALL    1.3f
 #define SECTION_H      22.0f   /* section header bar height */
 
-#define CONTENT_Y  ((float)TABBAR_H)
+#define CONTENT_Y  ((float)TOP_BAR_H)
 
 /* -----------------------------------------------------------------------
    Internal helpers */

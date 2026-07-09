@@ -16,6 +16,8 @@
 #include "core/level.h"
 #include "core/object_def.h"
 #include "core/playmode.h"
+#include "core/rules.h"
+#include "editor/play_mode.h"
 #include "platform/window.h"
 #include "platform/input.h"
 #include "renderer/renderer.h"
@@ -35,18 +37,20 @@
 #include "simulation/construction.h"
 #include "ai/agent.h"
 #include "ai/pathfinder.h"
-#include "ui/ui.h"
+#include "ui/menubar.h"
 #include "ui/text.h"
 #include "ui/font_atlas.h"
 #include "ui/panel.h"
 #include "ui/shape_pane.h"
 #include "ui/minimap.h"
 #include "ui/project_manager.h"
-#include "ui/tabbar.h"
+
 #include "ui/sprites_tab.h"
 #include "ui/objects_tab.h"
 #include "ui/settings_tab.h"
 #include "ui/theme.h"
+#include "ui/left_pane.h"
+#include "ui/inspector_pane.h"
 #include "scripting/lua_host.h"
 
 #define WINDOW_W 1280
@@ -89,8 +93,19 @@ int main(void) {
        binary's launch cwd (not the project folder — themes are an
        engine-level preference, not per-project, so this load happens
        once here rather than inside ENTER_EDITOR's per-project chdir). */
+       
+    char engine_root[512];
+    if (getcwd(engine_root, sizeof(engine_root))) {
+        theme_set_engine_root(engine_root);
+    } else {
+        engine_root[0] = '.';
+        engine_root[1] = '\0';
+    }
+    
     theme_reset_default();
-    theme_load("themes/default.theme");
+    char def_theme[1024];
+    snprintf(def_theme, sizeof(def_theme), "%s/themes/default.theme", engine_root);
+    theme_load(def_theme);
 
     dge_time_tick();
 
@@ -103,11 +118,11 @@ int main(void) {
     project_manager_init(&pm);
 
     /* ---- Editor state ---- */
-    SpriteAtlas        atlas;   memset(&atlas,   0, sizeof atlas);
-    AssetLibrary       assets;  asset_library_init(&assets);
-    World              world;   memset(&world,   0, sizeof world);
-    Registry           registry;
-    LevelRegistry       levels; level_registry_init(&levels);
+    static SpriteAtlas        atlas;
+    static AssetLibrary       assets;  asset_library_init(&assets);
+    static World              world;
+    static Registry           registry;
+    static LevelRegistry      levels; level_registry_init(&levels);
     /* Resolved from levels' active Level each time it changes (see
        REFRESH_LEVEL_PATHS() below) -- every call site that used to
        read the fixed WORLD_SAVE_PATH/ENTITY_SAVE_PATH constants now
@@ -118,22 +133,22 @@ int main(void) {
        per-level. */
     char cur_world_path[300]  = WORLD_SAVE_PATH;
     char cur_entity_path[300] = ENTITY_SAVE_PATH;
-    SpatialGrid        sgrid;   memset(&sgrid,   0, sizeof sgrid);
-    Editor             editor;
-    Panel              panel;
-    ShapePane          shape_pane; shape_pane_init(&shape_pane);
+    static SpatialGrid        sgrid;
+    static Editor             editor;
+    static LeftPane           left_pane; left_pane_init(&left_pane);
+    static InspectorPane      inspector_pane; inspector_pane_init(&inspector_pane);
     EditorMode         prev_editor_mode = EDITOR_MODE_PAINT;
-    SimClock           sim_clock;
-    ResourceStore      resources;
-    WeatherSystem      weather;
-    Camera             camera;
-    ObjectDefRegistry  obj_registry;
+    static SimClock           sim_clock;
+    static ResourceStore      resources;
+    static WeatherSystem      weather;
+    static Camera             camera;
+    static ObjectDefRegistry  obj_registry;
     objdef_registry_init(&obj_registry);
     LuaHost *lua = lua_host_create();
 
     /* Phase J — tab workspace */
-    TabBar      tabbar;
-    tabbar_init(&tabbar);
+    MenuBar     menubar;
+    menubar_init(&menubar);
 
     /* Phase K — sprites tab */
     SpritesTab  sprites_tab;
@@ -160,8 +175,10 @@ int main(void) {
     bool editor_ready = false;
 
     /* ---- Edit/Play split ---- */
-    typedef enum { MODE_EDIT = 0, MODE_PLAY } GameMode;
-    GameMode mode = MODE_EDIT;
+    PlayMode play_mode;
+    play_mode_init(&play_mode);
+    GameRules rules;
+    rules_clear(&rules);
     PlaySnapshot play_snap;
     memset(&play_snap, 0, sizeof play_snap);
 
@@ -225,7 +242,6 @@ int main(void) {
             sgrid_insert(&sgrid, (Entity)_e, _gx, _gy);                      \
           }                                                                   \
         }                                                                     \
-        panel_init(&panel, world.width, world.height);                       \
         { float _tw, _th; renderer_get_tile_size(&_tw, &_th);                \
           camera_center_on_world(&camera, world.width, world.height, _tw, _th); } \
     } while(0)
@@ -252,8 +268,8 @@ int main(void) {
             level_registry_bootstrap(&levels); /* defensive no-op if count>0 */\
         }                                                                      \
         REFRESH_LEVEL_PATHS();                                                \
-        if (mode == MODE_PLAY) playmode_snapshot_free(&play_snap);            \
-        mode = MODE_EDIT;                                                      \
+        if (play_mode_is_playing(&play_mode)) playmode_snapshot_free(&play_snap);            \
+        play_mode_stop(&play_mode);                                                      \
         if (editor_ready) atlas_destroy(&atlas);                               \
         atlas_load(&atlas, "assets/sprites.png", 32, 32, 4);                  \
         asset_library_destroy(&assets);                                       \
@@ -261,7 +277,6 @@ int main(void) {
         asset_library_load_meta(&assets);                                     \
         LOAD_ACTIVE_LEVEL();                                                   \
         editor_init(&editor);                                                  \
-        shape_pane_init(&shape_pane);                                          \
         simclock_init(&sim_clock);                                             \
         resource_store_init(&resources);                                       \
         simulation_load(&sim_clock, &resources, SIM_SAVE_PATH);               \
@@ -277,7 +292,8 @@ int main(void) {
         lua_host_set_context(lua, &registry, &obj_registry, &resources);      \
         lua_host_set_genre(lua, project.genre);                               \
         settings_tab_init(&settings_tab, &project, &editor_settings);           \
-        tabbar_init(&tabbar);                                                  \
+        menubar_init(&menubar);                                                  \
+        rules_load(&rules);                                                      \
         editor_ready = true;                                                   \
         LOG_INFO("Editor ready: '%s' (%dx%d) -- level '%s'", project.name,     \
                  project.grid_w, project.grid_h,                              \
@@ -328,8 +344,6 @@ int main(void) {
                with a resize and would be a real regression (e.g. hiding     \
                the sidebar, then resizing via Settings, would force it       \
                back open). */                                                \
-            panel.pending_w = world.width;                                    \
-            panel.pending_h = world.height;                                   \
             settings_tab.pending_grid_w = world.width;                       \
             settings_tab.pending_grid_h = world.height;                      \
             float _tw, _th; renderer_get_tile_size(&_tw, &_th);              \
@@ -371,32 +385,90 @@ int main(void) {
         /* ================================================================
            EDITOR SCREEN
            ================================================================ */
-        if (input_key_pressed(SDL_SCANCODE_ESCAPE)) break;
+        if (input_key_pressed(SDL_SCANCODE_ESCAPE)) {
+            menubar.active_dropdown = DROPDOWN_NONE;
+            editor.mode = EDITOR_MODE_SELECT;
+        }
 
         /* Tab selection */
         bool toggle_play = false;
-        ActiveTab cur_tab = tabbar_update(&tabbar, vw, &toggle_play);
+        MenuAction menu_action = MENU_ACTION_NONE;
+        ActiveTab cur_tab = menubar_update(&menubar, vw, vh, &toggle_play, &menu_action);
+        
+        if (menu_action == MENU_ACTION_QUIT) break;
+        else if (menu_action == MENU_ACTION_SAVE) {
+            world_save(&world, cur_world_path);
+            registry_save(&registry, cur_entity_path);
+            simulation_save(&sim_clock, &resources, SIM_SAVE_PATH);
+            weather_save(&weather, WEATHER_SAVE_PATH);
+            level_registry_save(&levels, "levels/manifest.def");
+            editor_settings_save(&editor_settings);
+            LOG_INFO("Project saved via Menu.");
+        }
+        else if (menu_action == MENU_ACTION_LOAD) {
+            world_load(&world, cur_world_path);
+            registry_load(&registry, cur_entity_path);
+            simulation_load(&sim_clock, &resources, SIM_SAVE_PATH);
+            weather_load(&weather, WEATHER_SAVE_PATH);
+            editor.selected = ENTITY_HANDLE_NULL;
+            SGRID_REBUILD();
+            LOG_INFO("Project loaded via Menu.");
+        }
+        else if (menu_action == MENU_ACTION_LEVEL_NEXT || menu_action == MENU_ACTION_LEVEL_PREV) {
+            world_save(&world, cur_world_path);
+            registry_save(&registry, cur_entity_path);
+            int n = levels.count;
+            if (n > 1) {
+                int next_idx = (menu_action == MENU_ACTION_LEVEL_NEXT)
+                                ? (levels.active_index + 1) % n
+                                : (levels.active_index - 1 + n) % n;
+                level_registry_set_active(&levels, next_idx);
+                REFRESH_LEVEL_PATHS();
+                LOAD_ACTIVE_LEVEL();
+                level_registry_save(&levels, "levels/manifest.def");
+                editor.selected = ENTITY_HANDLE_NULL;
+                LOG_INFO("Switched to level '%s' (%d/%d)", level_registry_active(&levels)->name, next_idx + 1, n);
+            }
+        }
+        else if (menu_action == MENU_ACTION_LEVEL_ADD) {
+            world_save(&world, cur_world_path);
+            registry_save(&registry, cur_entity_path);
+            char name[LEVEL_NAME_MAX];
+            snprintf(name, sizeof(name), "Level %d", levels.count + 1);
+            int new_idx = level_registry_add(&levels, name);
+            if (new_idx >= 0) {
+                level_registry_set_active(&levels, new_idx);
+                REFRESH_LEVEL_PATHS();
+                LOAD_ACTIVE_LEVEL();
+                level_registry_save(&levels, "levels/manifest.def");
+                editor.selected = ENTITY_HANDLE_NULL;
+                LOG_INFO("Added and switched to level '%s' (%d/%d)", name, new_idx + 1, levels.count);
+            }
+        }
 
         if (toggle_play) {
-            if (mode == MODE_EDIT) {
+            if (play_mode_is_editing(&play_mode)) {
                 if (playmode_snapshot(&play_snap, &world, &registry, &resources,
                                       &sim_clock, &weather)) {
-                    mode = MODE_PLAY;
+                    play_mode_enter_play(&play_mode);
                     editor.selected = ENTITY_HANDLE_NULL;
                     LOG_INFO("-- PLAY --");
                 } else {
                     LOG_ERROR("Could not enter Play mode (snapshot failed) — staying in Edit");
                 }
-            } else {
+            } else if (play_mode_is_playing(&play_mode) || play_mode_ended(&play_mode)) {
                 playmode_restore(&play_snap, &world, &registry, &resources, &sim_clock, &weather);
                 playmode_snapshot_free(&play_snap);
-                mode = MODE_EDIT;
+                play_mode_stop(&play_mode);
+                lua_host_clear_cache(lua);
                 LOG_INFO("-- STOP --");
             }
         }
+        
+        play_mode_update(&play_mode, dge_time_delta());
 
         /* ---- Content area is below the tab bar ---- */
-        int content_vh = vh - TABBAR_H;  /* logical height for sub-systems */
+        int content_vh = vh - TOP_BAR_H;  /* logical height for sub-systems */
         (void)content_vh;
 
         /* ---- Save / Load (Edit mode only) ----
@@ -406,7 +478,7 @@ int main(void) {
            exists to prevent. F9 similarly shouldn't load over whatever
            Play is running; Stop already restores the pre-Play state
            on its own. */
-        if (mode == MODE_EDIT && !input_keyboard_consumed()) {
+        if (play_mode_is_editing(&play_mode) && !input_keyboard_consumed()) {
             if (input_key_pressed(SDL_SCANCODE_F5)) {
                 world_save(&world, cur_world_path);
                 registry_save(&registry, cur_entity_path);
@@ -476,15 +548,37 @@ int main(void) {
             }
         }
 
+        /* ---- Phase 5: Win/Lose condition evaluation ----
+           Only fires during active Play (not paused, not already ended).
+           Win script is checked first — if it returns true, the game
+           is won regardless of the lose script. If win doesn't fire
+           but lose does, the game is lost. A project with no rules.def
+           or empty script paths simply never triggers either. */
+        if (play_mode.state == PLAY_MODE_PLAY && lua && rules.loaded) {
+            if (rules.win_script[0] &&
+                lua_host_eval_condition(lua, rules.win_script)) {
+                play_mode.state = PLAY_MODE_WON;
+                snprintf(play_mode.end_message, sizeof play_mode.end_message,
+                         "%s", rules.win_message[0] ? rules.win_message : "You Win!");
+                LOG_INFO("GAME WON: %s", play_mode.end_message);
+            } else if (rules.lose_script[0] &&
+                       lua_host_eval_condition(lua, rules.lose_script)) {
+                play_mode.state = PLAY_MODE_LOST;
+                snprintf(play_mode.end_message, sizeof play_mode.end_message,
+                         "%s", rules.lose_message[0] ? rules.lose_message : "Game Over");
+                LOG_INFO("GAME LOST: %s", play_mode.end_message);
+            }
+        }
+
         /* Fire on_click in Play mode: LMB on a tile that holds an
            entity triggers that entity's on_click behavior.  In Edit
            mode clicking is for SELECT, not script dispatch. */
-        if (mode == MODE_PLAY && cur_tab == TAB_WORLD && lua) {
+        if (play_mode_is_playing(&play_mode) && cur_tab == TAB_WORLD && lua) {
             if (input_mouse_button_pressed(SDL_BUTTON_LEFT)) {
                 int _mx, _my; input_mouse_pos(&_mx, &_my);
                 /* Only fire if the click is in the world viewport (not
                    over the tab bar at the top). */
-                if (_my > TABBAR_H) {
+                if (_my > TOP_BAR_H) {
                     Vec2 _w = camera_screen_to_world(&camera, (float)_mx, (float)_my);
                     float _fgx, _fgy;
                     renderer_world_to_grid(_w.x, _w.y, &_fgx, &_fgy);
@@ -513,7 +607,7 @@ int main(void) {
                 lua_host_clear_cache(lua);
                 LOG_INFO("Lua script cache cleared (Ctrl+R)");
             }
-            if (input_key_pressed(SDL_SCANCODE_H) && cur_tab == TAB_WORLD && mode == MODE_EDIT) {
+            if (input_key_pressed(SDL_SCANCODE_H) && cur_tab == TAB_WORLD && play_mode_is_editing(&play_mode)) {
                 if (entity_handle_valid(&registry, editor.selected)) {
                     if (system_harvest_entity(&registry, editor.selected, &resources))
                         editor.selected = ENTITY_HANDLE_NULL;
@@ -553,135 +647,16 @@ int main(void) {
            In Play there's nothing to paint/place/select -- the whole
            point of Play is "watch/test the game as it actually runs",
            not "keep editing it". */
-        if (cur_tab == TAB_WORLD && mode == MODE_EDIT) {
-            PanelAction pa;
-            panel_update(&panel, &editor, &resources, &weather,
-                        &obj_registry, &sprites_tab, &atlas, &world, project.genre, &levels, vw, vh, &pa);
-            switch (pa.type) {
-                case PANEL_ACTION_NEW:
-                    world_clear(&world); registry_init(&registry);
-                    editor.selected = ENTITY_HANDLE_NULL;
-                    SGRID_REBUILD(); break;
-                case PANEL_ACTION_REGENERATE:
-                    world_generate(&world, (unsigned int)SDL_GetTicks());
-                    registry_init(&registry);
-                    editor.selected = ENTITY_HANDLE_NULL;
-                    SGRID_REBUILD(); break;
-                case PANEL_ACTION_SAVE:
-                    world_save(&world, cur_world_path);
-                    registry_save(&registry, cur_entity_path);
-                    simulation_save(&sim_clock, &resources, SIM_SAVE_PATH);
-                    weather_save(&weather, WEATHER_SAVE_PATH); break;
-                case PANEL_ACTION_LOAD:
-                    world_load(&world, cur_world_path);
-                    registry_load(&registry, cur_entity_path);
-                    simulation_load(&sim_clock, &resources, SIM_SAVE_PATH);
-                    weather_load(&weather, WEATHER_SAVE_PATH);
-                    editor.selected = ENTITY_HANDLE_NULL;
-                    SGRID_REBUILD(); break;
-                case PANEL_ACTION_RESIZE:
-                    COMPLETE_WORLD_RESIZE(panel.pending_w, panel.pending_h);
-                    break;
-                case PANEL_ACTION_WEATHER_TOGGLE:
-                    weather_set_enabled(&weather, !weather.enabled); break;
-                case PANEL_ACTION_WEATHER_SET:
-                    weather_set_type(&weather, (WeatherType)pa.weather_type); break;
-                case PANEL_ACTION_LEVEL_PREV:
-                case PANEL_ACTION_LEVEL_NEXT: {
-                    /* Persist the level we're leaving before switching --
-                       same "don't lose edits on navigation" reasoning as
-                       every other save point in this file. Manifest isn't
-                       re-saved here (active_index is about to change
-                       anyway and gets saved once below), just the
-                       world/entity data for the level itself. */
-                    world_save(&world, cur_world_path);
-                    registry_save(&registry, cur_entity_path);
+        if (cur_tab == TAB_WORLD && play_mode_is_editing(&play_mode)) {
+            left_pane_update(&left_pane, &editor, &registry, vh);
+            inspector_pane_update(&inspector_pane, &editor, &registry,
+                                  left_pane.selected_entity, vw, vh);
 
-                    int n = levels.count;
-                    int next_idx = levels.active_index;
-                    if (n > 1) {
-                        next_idx = (pa.type == PANEL_ACTION_LEVEL_NEXT)
-                                 ? (levels.active_index + 1) % n
-                                 : (levels.active_index - 1 + n) % n;
-                    }
-                    level_registry_set_active(&levels, next_idx);
-                    REFRESH_LEVEL_PATHS();
-                    LOAD_ACTIVE_LEVEL();
-                    level_registry_save(&levels, "levels/manifest.def");
-                    editor.selected = ENTITY_HANDLE_NULL;
-                    LOG_INFO("Switched to level '%s' (%d/%d)",
-                             level_registry_active(&levels)->name, next_idx + 1, n);
-                    break;
-                }
-                case PANEL_ACTION_LEVEL_ADD: {
-                    /* Persist the level we're leaving, same as PREV/NEXT
-                       above -- adding a new level still navigates away
-                       from whichever one is currently active. */
-                    world_save(&world, cur_world_path);
-                    registry_save(&registry, cur_entity_path);
-
-                    char name[LEVEL_NAME_MAX];
-                    snprintf(name, sizeof(name), "Level %d", levels.count + 1);
-                    int new_idx = level_registry_add(&levels, name);
-                    if (new_idx >= 0) {
-                        level_registry_set_active(&levels, new_idx);
-                        REFRESH_LEVEL_PATHS();
-                        /* No file exists yet at the new level's paths --
-                           LOAD_ACTIVE_LEVEL()'s own world_load() call
-                           will fail (expected) and fall through to
-                           world_topology_generate(), the same
-                           "no save yet -> generate fresh" path a
-                           brand-new project's very first ENTER_EDITOR
-                           already goes through. New level starts as a
-                           plain rectangle at the project's default grid
-                           size -- shaping/resizing it further is a
-                           SHAPE-mode/Settings job once it's active, not
-                           something "+" needs to ask up front. */
-                        LOAD_ACTIVE_LEVEL();
-                        level_registry_save(&levels, "levels/manifest.def");
-                        editor.selected = ENTITY_HANDLE_NULL;
-                        LOG_INFO("Added and switched to level '%s' (%d/%d)",
-                                 name, new_idx + 1, levels.count);
-                    }
-                    break;
-                }
-                default: break;
-            }
-
-            /* ---- Shape Pane (flat-grid mask painter, docked right) ----
-               Live-linked to world.shape: shape_pane_update() writes
-               directly into the same struct world_render() reads, so
-               there's no apply step -- painting here shows up in the
-               isometric view the very next frame. Only active while in
-               EDITOR_MODE_SHAPE; shape_pane_fit_to_world() re-frames the
-               flat grid once on entry so it doesn't open scrolled to
-               wherever a previous session left it relative to a since-
-               resized world. */
-            if (editor.mode == EDITOR_MODE_SHAPE) {
-                if (prev_editor_mode != EDITOR_MODE_SHAPE)
-                    shape_pane_fit_to_world(&shape_pane, &world, vh);
-                shape_pane_update(&shape_pane, &world, vw, vh);
-            }
-            prev_editor_mode = editor.mode;
-
-            /* editor_update() always runs (TAB mode-switching and other
-               non-mouse handling must work regardless of where the
-               cursor is) but is told to exclude the Shape Pane's screen
-               region from tile hit-testing while it's open -- see
-               editor.h's ui_right_margin doc comment. Without this, a
-               click inside the flat pane could ALSO land on whatever
-               isometric tile happens to render underneath that same
-               screen region (the iso camera can pan/zoom such that
-               world tiles visually extend under a right-docked panel),
-               double-painting one click in two different grid positions.
-               Outside SHAPE mode the pane isn't shown, so 0 disables
-               the exclusion entirely -- same convention ui_panel_width
-               already uses for "no panel here". */
-            int shape_pane_right_margin =
-                (editor.mode == EDITOR_MODE_SHAPE) ? (vw - SHAPE_PANE_W) : 0;
+            int current_left_w = left_pane.is_collapsed ? 24 : LEFT_PANE_WIDTH;
+            int current_right_w = inspector_pane.is_collapsed ? 24 : INSPECTOR_PANE_WIDTH;
             editor_update(&editor, &registry, &world, &camera, &resources,
-                          &sgrid, panel_effective_width(&panel), TABBAR_H + STATUS_BAR_H,
-                          shape_pane_right_margin);
+                          &sgrid, current_left_w, TOP_BAR_H,
+                          vw - current_right_w);
         }
 
         /* ---- Tab-specific updates (non-World) ---- */
@@ -719,10 +694,10 @@ int main(void) {
             }
             if (settings_tab.wants_close_project) {
                 settings_tab.wants_close_project = false;
-                if (mode == MODE_PLAY) {
+                if (play_mode_is_playing(&play_mode)) {
                     playmode_restore(&play_snap, &world, &registry, &resources, &sim_clock, &weather);
                     playmode_snapshot_free(&play_snap);
-                    mode = MODE_EDIT;
+                    play_mode_stop(&play_mode);
                 }
                 /* Same persistence F5 does, so nothing placed/painted
                    this session is lost just because the project is
@@ -747,7 +722,7 @@ int main(void) {
         if (cur_tab == TAB_WORLD) {
             renderer_begin(&camera);
             world_render(&world, &atlas);
-            if (mode == MODE_EDIT) editor_render(&editor, &registry);
+            if (play_mode_is_editing(&play_mode)) editor_render(&editor, &registry);
             system_animate_entities(&registry, dge_time_delta());
             system_render_entities(&registry, &atlas, &assets);
             weather_render(&weather, &camera);
@@ -756,28 +731,30 @@ int main(void) {
 
         renderer_begin_ui(vw, vh);
 
-        /* Tab bar always on top */
-        tabbar_render(&tabbar, vw, mode == MODE_PLAY);
+        /* Menu bar always on top */
+        menubar_render(&menubar, vw, play_mode_is_playing(&play_mode) || play_mode_ended(&play_mode));
+        if (play_mode.overlay_timer > 0.0f) {
+            menubar_render_play_overlay(play_mode.overlay_timer, play_mode.state == PLAY_MODE_PAUSED, vw, vh);
+        }
 
-        if (cur_tab == TAB_WORLD && mode == MODE_EDIT) {
-            ui_render(&resources, &sim_clock, &weather, &editor, &registry, &world,
-                      project.genre, vw, vh, world.width, world.height,
-                      panel_effective_width(&panel) + 10);
-            panel_render(&panel, &editor, &resources, &weather, &obj_registry,
-                         &atlas, &sprites_tab, &world, project.genre, &levels, vw, vh);
-            minimap_render(&world, &registry, &camera, vw, vh);
-            if (editor.mode == EDITOR_MODE_SHAPE)
-                shape_pane_render(&shape_pane, &world, vw, vh);
-        } else if (cur_tab == TAB_WORLD && mode == MODE_PLAY) {
-            /* No sidebar to offset against -- the status row gets the
-               full width back, same reasoning as panel_effective_width()
-               returning 0 when the sidebar is hidden in Edit mode. */
-            ui_render(&resources, &sim_clock, &weather, &editor, &registry, &world,
-                      project.genre, vw, vh, world.width, world.height, 10);
-            minimap_render(&world, &registry, &camera, vw, vh);
+        if (cur_tab == TAB_WORLD && play_mode_is_editing(&play_mode)) {
+            /* Draw original panel stuff (like weather toggle) for now temporarily */
+            /* panel_render(&panel, &editor, &resources, &weather, &obj_registry,
+                         &atlas, &sprites_tab, &world, project.genre, &levels, vw, vh); */
+            
+            if (editor_settings.show_minimap)
+                minimap_render(&world, &registry, &camera, vw, vh);
+            
+            /* Render New Editor Panes */
+            left_pane_render(&left_pane, &editor, &registry, vh);
+            inspector_pane_render(&inspector_pane, &editor, &registry, left_pane.selected_entity, vw, vh);
+            
+        } else if (cur_tab == TAB_WORLD && play_mode_is_playing(&play_mode)) {
+            if (editor_settings.show_minimap)
+                minimap_render(&world, &registry, &camera, vw, vh);
 
             const char *hint = "PLAYING -- click STOP (top right) to return to editing";
-            text_draw(12.0f, (float)TABBAR_H + 8.0f, 1.3f, 0.6f, 0.85f, 0.65f, 1.0f, hint);
+            text_draw(12.0f, (float)TOP_BAR_H + 8.0f, 1.3f, 0.6f, 0.85f, 0.65f, 1.0f, hint);
         } else if (cur_tab == TAB_SPRITES) {
             sprites_tab_render(&sprites_tab, vw, vh);
         } else if (cur_tab == TAB_OBJECTS) {
@@ -786,6 +763,66 @@ int main(void) {
             settings_tab_render(&settings_tab, &project, vw, vh);
         }
 
+        /* Phase 5: Win/Lose end-state overlay */
+        if (play_mode_ended(&play_mode)) {
+            /* Full-screen dim */
+            renderer_draw_quad(0.0f, 0.0f, (float)vw, (float)vh,
+                               0.0f, 0.0f, 0.0f, 0.65f);
+
+            float scale_big   = 4.0f;
+            float scale_small = 1.8f;
+            const Theme *th_ = theme_current();
+
+            /* Title: "YOU WIN!" or "GAME OVER" */
+            const char *title = (play_mode.state == PLAY_MODE_WON)
+                                ? "YOU WIN!" : "GAME OVER";
+            float title_w = text_measure_width(title, scale_big);
+            float title_h = text_line_height(scale_big);
+            float title_x = ((float)vw - title_w) * 0.5f;
+            float title_y = (float)vh * 0.35f;
+
+            /* Backing box */
+            float box_pad = 30.0f;
+            float msg_h = text_line_height(scale_small);
+            float box_h = title_h + msg_h + box_pad * 3.0f + 40.0f;
+            float box_w = (title_w > 400.0f ? title_w : 400.0f) + box_pad * 2.0f;
+            float box_x = ((float)vw - box_w) * 0.5f;
+            float box_y = title_y - box_pad;
+            renderer_draw_quad(box_x, box_y, box_w, box_h,
+                               0.06f, 0.06f, 0.08f, 0.92f);
+            /* Border */
+            float br, bg, bb;
+            if (play_mode.state == PLAY_MODE_WON) {
+                br = th_->accent_r; bg = th_->accent_g; bb = th_->accent_b;
+            } else {
+                br = th_->error_r; bg = th_->error_g; bb = th_->error_b;
+            }
+            renderer_draw_quad(box_x, box_y, box_w, 3.0f, br, bg, bb, 1.0f);
+            renderer_draw_quad(box_x, box_y + box_h - 3.0f, box_w, 3.0f, br, bg, bb, 1.0f);
+
+            /* Title text */
+            text_draw(title_x, title_y, scale_big, br, bg, bb, 1.0f, title);
+
+            /* Custom message */
+            if (play_mode.end_message[0]) {
+                float msg_w = text_measure_width(play_mode.end_message, scale_small);
+                text_draw(((float)vw - msg_w) * 0.5f,
+                          title_y + title_h + box_pad,
+                          scale_small, 0.8f, 0.8f, 0.82f, 1.0f,
+                          play_mode.end_message);
+            }
+
+            /* Hint */
+            const char *hint = "Click STOP to return to editing";
+            float hint_w = text_measure_width(hint, 1.3f);
+            text_draw(((float)vw - hint_w) * 0.5f,
+                      box_y + box_h - 30.0f,
+                      1.3f, 0.5f, 0.5f, 0.55f, 1.0f, hint);
+        }
+
+        /* Dropdowns must be rendered last so they appear on top of everything */
+        menubar_render_dropdowns(&menubar, vw, vh);
+
         renderer_end();
         window_swap(&window);
     }
@@ -793,7 +830,7 @@ int main(void) {
     /* Shutdown */
     editor_settings_save(&editor_settings);
     lua_host_destroy(lua);
-    if (mode == MODE_PLAY) playmode_snapshot_free(&play_snap);
+    if (play_mode_is_playing(&play_mode) || play_mode_ended(&play_mode)) playmode_snapshot_free(&play_snap);
     if (editor_ready) {
         world_destroy(&world);
         sgrid_destroy(&sgrid);
