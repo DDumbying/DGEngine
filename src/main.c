@@ -295,6 +295,49 @@ int main(void) {
         }                                                                      \
     } while(0)
 
+    /* Phase 4 (Sidebar cleanup): the single owner for "a resize just
+       happened, now make every piece of state that cares agree with
+       the new dimensions." Before this existed, PANEL_ACTION_RESIZE
+       (the sidebar's quick +/- buttons) and settings_tab.wants_resize
+       (Settings' precise text-field entry) each called world_resize()
+       directly and then did their OWN, DIFFERENT partial cleanup —
+       Settings' path refreshed the panel's pending fields via
+       panel_init() but neither path ever refreshed the OTHER UI's
+       pending fields, and — the real bug — neither ever updated
+       project.grid_w/h at all. That field would silently go stale the
+       moment you resized through either UI, and stay wrong forever
+       (reloading doesn't fix it either: world_load() only touches the
+       World struct, never writes back into Project). It's not just
+       cosmetic — PANEL_ACTION_LEVEL_ADD (Phase 3) sizes a brand new
+       Level from project.grid_w/h, so a stale value there meant new
+       levels could silently be created at the WRONG size after any
+       resize.
+
+       Both call sites now route through this one macro instead of
+       duplicating (and inevitably diverging on) the cleanup — "one
+       owner" in the sense the roadmap meant: not fewer UI entry
+       points, but exactly one place that defines what "resized"
+       actually means for the rest of the program's state. */
+    #define COMPLETE_WORLD_RESIZE(new_w, new_h) do {                          \
+        if (world_resize(&world, (new_w), (new_h))) {                        \
+            project.grid_w = world.width;                                    \
+            project.grid_h = world.height;                                   \
+            /* Only the dimension fields, NOT a full panel_init() --         \
+               that would also force p->visible=true and reset scroll/       \
+               rename/sprite-assignment state, which has nothing to do       \
+               with a resize and would be a real regression (e.g. hiding     \
+               the sidebar, then resizing via Settings, would force it       \
+               back open). */                                                \
+            panel.pending_w = world.width;                                    \
+            panel.pending_h = world.height;                                   \
+            settings_tab.pending_grid_w = world.width;                       \
+            settings_tab.pending_grid_h = world.height;                      \
+            float _tw, _th; renderer_get_tile_size(&_tw, &_th);              \
+            camera_center_on_world(&camera, world.width, world.height, _tw, _th); \
+            SGRID_REBUILD();                                                  \
+        }                                                                      \
+    } while(0)
+
     while (!input_quit_requested()) {
         input_begin_frame();
         SDL_Event ev;
@@ -537,11 +580,8 @@ int main(void) {
                     editor.selected = ENTITY_HANDLE_NULL;
                     SGRID_REBUILD(); break;
                 case PANEL_ACTION_RESIZE:
-                    if (world_resize(&world, panel.pending_w, panel.pending_h)) {
-                        float tw, th; renderer_get_tile_size(&tw, &th);
-                        camera_center_on_world(&camera, world.width, world.height, tw, th);
-                        SGRID_REBUILD();
-                    } break;
+                    COMPLETE_WORLD_RESIZE(panel.pending_w, panel.pending_h);
+                    break;
                 case PANEL_ACTION_WEATHER_TOGGLE:
                     weather_set_enabled(&weather, !weather.enabled); break;
                 case PANEL_ACTION_WEATHER_SET:
@@ -669,13 +709,7 @@ int main(void) {
             }
             /* Handle resize requests from settings tab */
             if (settings_tab.wants_resize) {
-                if (world_resize(&world, settings_tab.pending_grid_w,
-                                          settings_tab.pending_grid_h)) {
-                    float tw, th; renderer_get_tile_size(&tw, &th);
-                    camera_center_on_world(&camera, world.width, world.height, tw, th);
-                    panel_init(&panel, settings_tab.pending_grid_w, settings_tab.pending_grid_h);
-                    SGRID_REBUILD();
-                }
+                COMPLETE_WORLD_RESIZE(settings_tab.pending_grid_w, settings_tab.pending_grid_h);
                 settings_tab.wants_resize = false;
             }
             if (settings_tab.wants_tile_resize) {

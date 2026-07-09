@@ -349,19 +349,49 @@ map am I editing right now"):**
   still exclusively free-pan/zoom; a Level doesn't yet carry or apply
   any camera-behavior data of its own.
 
-### Phase 4 — Sidebar cleanup
+### Phase 4 — Sidebar cleanup ✅ DONE
 Now that Phase 1–2 remove the reasons the sidebar got cluttered:
 
-- World-editing sidebar shows exactly: mode switch, the active mode's
-  palette/options, world management (new/resize/save/load). Nothing
-  about weather, resources, or simulation tuning.
-- Weather/resource controls move to Settings, under a section that's
-  only shown when the active project's `rules.def` says simulation is
-  on — not hardcoded into the World tab regardless of project type.
-- Collapse the two competing resize owners (Panel's +/- buttons and
-  Settings' grid fields currently do the same `world_resize()`
-  independently, with `project.grid_w/h` going stale after either path)
-  into one owner.
+**What actually shipped:**
+- `main.c` — the real bug here, confirmed by reading the actual code
+  rather than assuming the original plan's description was still
+  accurate: `project.grid_w`/`project.grid_h` was **never** updated
+  after a resize through either UI, and stayed wrong forever (reloading
+  doesn't fix it either — `world_load()` only touches the `World`
+  struct, never writes back into `Project`). This wasn't just cosmetic
+  — Phase 3's `PANEL_ACTION_LEVEL_ADD` sizes a brand new Level from
+  `project.grid_w/h`, so a stale value there meant new Levels could
+  silently be created at the wrong size after any resize. A second,
+  separate bug in the same code: Settings' resize handler called
+  `panel_init()` to refresh the panel's pending fields, which also
+  unconditionally reset `panel.visible = true` and wiped in-progress
+  Tileset rename/scroll state — resizing via Settings while the sidebar
+  was hidden would silently force it back open.
+- Both bugs are fixed by one new `COMPLETE_WORLD_RESIZE(new_w, new_h)`
+  macro that both `PANEL_ACTION_RESIZE` (the sidebar's quick +/-
+  buttons) and `settings_tab.wants_resize` (Settings' precise
+  text-field entry) now route through — "one owner" in the sense the
+  original plan meant: not fewer UI entry points (both quick-nudge and
+  precise-value resizing are genuinely useful, kept both), but exactly
+  one place that defines what "resized" means for the rest of the
+  program's state (`project.grid_w/h`, both UIs' pending fields, the
+  camera, the spatial grid) — instead of two independently-diverging
+  partial implementations.
+- **Deliberately not done — reconsidered, not forgotten**: the original
+  plan called for moving Weather controls out of the World tab into a
+  Settings section gated by a not-yet-built `rules.def`. On inspection,
+  weather is **already correctly gated** by `GenreProfile` (a `main.c`/
+  `panel.c` change from before Phase 1) — it only appears in the World
+  tab for `GENRE_SANDBOX_SIM` projects, which already satisfies the
+  stated goal ("not hardcoded regardless of project type"). Physically
+  relocating it to Settings on top of that would trade away *live*
+  access to weather while looking at the world it affects, for no
+  remaining problem it would actually solve — reconsidered as a UX
+  regression rather than a cleanup, and left in the World tab. No
+  resource display exists in the World sidebar at all (confirmed by
+  reading `panel.c` — it holds a `ResourceStore*` parameter but never
+  reads from it), so that half of the original bullet was already true
+  before this phase started.
 
 ### Phase 5 — Win/lose/goal system
 The smallest addition that turns a sandbox into an actual game.
@@ -405,9 +435,8 @@ Named explicitly so it's clear what's *not* being rebuilt:
 
 ## 6. Current status
 
-Phases 1–3 are complete (Tileset-as-data; PrefabKind/BuildingKind/
-ResourceKind retired into ObjectDef; the Level/Scene system's Part A).
-Phase 4 (Sidebar cleanup) is next — collapsing the two competing world-
-resize owners and moving Weather/resource controls into a
-genre-gated Settings section, now that Phases 1–3 removed the reasons
-the World sidebar got cluttered in the first place.
+Phases 1–4 are complete (Tileset-as-data; PrefabKind/BuildingKind/
+ResourceKind retired into ObjectDef; the Level/Scene system's Part A;
+Sidebar cleanup — the resize state consolidation). Phase 5 (Win/lose/
+goal system) is next — the smallest addition that turns a sandbox into
+an actual game.

@@ -943,8 +943,8 @@ Phase 2  Retire PrefabKind/BuildingKind/ResourceKind
 Phase 3  Level/Scene system (§6)
            Part A (authoring-time levels)          DONE
            Part B (runtime transitions)            depends on Phase 6
-Phase 4  Sidebar cleanup                           next
-Phase 5  Win/lose/goals (§13)                      depends on Phase 4
+Phase 4  Sidebar cleanup                           DONE
+Phase 5  Win/lose/goals (§13)                      next
 Phase 6  Runtime build (§17)                       depends on Phase 3B, 5
 Phase 7  Camera drivers (§4), in-game UI, audio (§18)   depends on Phase 6
 Phase 8  ECS scale (dense/sparse), chunked worlds   unscoped, as-needed
