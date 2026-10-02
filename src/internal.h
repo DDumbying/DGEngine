@@ -4,8 +4,12 @@
 #include "slime/slime.h"
 #include "vec3.h"
 
-#define SL_PAIRS_PER_PARTICLE 32
+#define SL_CHUNK 256
 #define SL_WALL_SAMPLES 64
+#define SL_MAX_COLORS 64
+#define SL_CALM_STEPS 30
+
+enum { F_FLUID = 1, F_PINNED = 2, F_TOUCH = 4, F_AWAKE = 8, F_WET = 16 };
 
 typedef struct {
     sl_collider_desc desc;
@@ -13,32 +17,56 @@ typedef struct {
     sl_vec3 prev_pos;
     sl_vec3 pos_t, pos_t0;   /* frame at the current substep and the one before */
     quat rot_t, rot_t0;
+    sl_vec3 force;
 } collider;
 
-typedef struct { int i, j; float r; } pair;   /* contacts store the shock factor in r */
+typedef struct { int i, j; float lift; int color; } contact;   /* lift: shock propagation factor */
+typedef struct { int a, b; float rest, compliance; int obj; } dist_con;
+typedef struct { int slot, cluster; sl_vec3 rest; } member;
+typedef struct {
+    int first, count, obj;
+    float stiffness, plasticity;
+    quat rot;
+    sl_vec3 center;
+} cluster;
 
 typedef struct {
-    int table_size;   /* power of two */
-    float cell;   /* kernel radius plus the pair margin */
-    int *start;       /* table_size + 1 */
-    int *sorted;      /* particle indices grouped by bucket */
-    sl_vec3 *sorted_p;
-    int *bucket;      /* bucket of each particle */
+    int alive, kind, nu, nv;
+    sl_particle *ids;
+    int count;
+    float self_dist;
+} object;
+
+enum { OBJ_ROPE = 1, OBJ_CLOTH, OBJ_SOFT };
+
+typedef struct {
+    int dense;            /* dense grid over the bounds, or a hash table when particles are spread out */
+    int nx, ny, nz, cells, start_cap, table_size;
+    float cell;
+    sl_vec3 origin;
+    int *start;           /* cells + 1 */
+    int *bucket;          /* per slot */
+    int *sorted;          /* slots grouped by cell */
 } grid;
+
+typedef struct sl_pool sl_pool;
 
 struct sl_world {
     sl_allocator alloc;
-    int max_particles, count, substeps, iterations;
-    float radius, spacing, h, w_rest, sleep_speed;
+    int max_particles, cap, count, substeps, iterations, fluid_iterations;
+    float radius, spacing, h, skin, w_rest, sleep_speed, hs, dt;
     float wall_table[SL_WALL_SAMPLES + 1];
     sl_vec3 gravity;
 
-    sl_vec3 *x, *p, *v, *delta, *x_step, *grad, *wall_grad;
-    float *inv_mass, *lambda, *rho, *grad2;
-    sl_material *mat;
-    unsigned char *touch, *fluid;
-    pair *pairs, *contacts;
-    int pair_count, pair_cap, contact_count;
+    /* per slot */
+    sl_vec3 *x, *p, *v, *x_step, *x_build, *delta, *tmp;
+    sl_vec3 *push;               /* per slot, 2 entries: impulse given to colliders last awake step */
+    float *lambda, *inv_mass, *mass;
+    unsigned char *flags, *calm, *mat, *push_id;   /* push_id: 2 per slot, collider + 1 or 0 */
+    int *id, *obj, *island, *order;
+
+    /* stable ids */
+    int *id_slot, *free_ids, free_count, next_id;
 
     sl_material_desc materials[SL_MAX_MATERIALS];
     int material_count;
@@ -46,21 +74,65 @@ struct sl_world {
     int collider_count;
 
     grid g;
+    int *nbr_off, *nbr, nbr_cap, nbr_r_cap;
+    float *nbr_r;                       /* distance per neighbor entry, from the lambda pass */
+    int *pairs, pair_count;   /* each close pair once as i, j; only valid during a rebuild */
+    int chunk_pairs;          /* room per chunk when pairs are found in one pass */
+    contact *contacts, *contact_tmp;
+    int contact_count, contact_cap, contact_tmp_cap, color_off[SL_MAX_COLORS + 2];
+    int *active, active_count;
+    int *island_calm, island_count, island_cap;
+    int need_rebuild, rebuilds;
+
+    object *objects;
+    int object_count, object_cap;
+    dist_con *dist;
+    float *dist_lambda;
+    int dist_count, dist_cap, dist_lambda_cap, dist_color_off[SL_MAX_COLORS + 2];
+    cluster *clusters;
+    int cluster_count, cluster_cap;
+    member *members;
+    int member_count, member_cap;
+    int *mem_off, *mem_list, mem_list_cap, mem_dirty;   /* per slot: indices into members */
+
+
+    sl_task_system tasks;
+    sl_pool *pool;
 };
 
+/* memory */
 void *sl__alloc(sl_world *w, size_t size);
 void sl__free(sl_world *w, void *ptr);
+int sl__grow(sl_world *w, void **ptr, int *cap, int need, size_t elem);
 
-int grid_init(sl_world *w);
-void grid_free(sl_world *w);
-void grid_build(sl_world *w);
-void grid_pairs(sl_world *w);
+/* threads: fn runs over [begin, end) of count items, chunk is a fixed index for reductions */
+typedef void (*sl_range_fn)(sl_world *w, int begin, int end, int chunk, void *ctx);
+void sl__parallel(sl_world *w, int count, sl_range_fn fn, void *ctx);
+int sl__chunks(int count);
+sl_pool *pool_create(sl_world *w, int threads);
+void pool_destroy(sl_world *w, sl_pool *p);
+void pool_wake(sl_pool *p);
+void pool_sleep(sl_pool *p);
+void pool_run(sl_pool *p, sl_task_fn *task, int count, void *ctx);
 
+/* grid and neighbors */
 float kernel(float r, float h);
-void wall_table_init(sl_world *w);
+int grid_rebuild(sl_world *w, int move);   /* move: also reorder particles in memory */
+void update_islands(sl_world *w);
+void sl__remove_object_particles(sl_world *w, int obj);
+
+/* solver passes */
 void collider_frames(sl_world *w, float t);
-float wall_density(const sl_world *w, int i, sl_vec3 *grad);
-void collide_particles(sl_world *w);
-void solve_substep(sl_world *w, float hs, float t);
+void wall_table_init(sl_world *w);
+float wall_density(sl_world *w, int i, sl_vec3 *grad, float scale);
+void book_push(sl_world *w, int i, int collider, sl_vec3 impulse);
+void solve_colliders(sl_world *w);
+void solve_substep(sl_world *w, float t);
+void fluid_step(sl_world *w);
+void objects_substep(sl_world *w);
+void objects_solve(sl_world *w);
+void objects_plasticity(sl_world *w);
+void objects_remap(sl_world *w, const int *old_to_new);
+int objects_membership(sl_world *w);
 
 #endif
