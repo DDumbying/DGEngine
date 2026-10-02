@@ -104,7 +104,7 @@ target_link_libraries(your_game PRIVATE slime)
 ### Demo
 
 The demo uses [raylib](https://www.raylib.com). If raylib 5.5 is not installed, CMake fetches it.
-It opens an empty sandbox: pick a tool and build whatever you like. Water and slime are drawn with
+It opens an empty sandbox in a dark theme: pick a tool and build whatever you like. Water and slime are drawn with
 screen-space fluid rendering from the ellipsoids slime computes, smoothed into one surface and
 shaded with refraction, absorption and sky reflection; spray and foam are soft white specks; sand
 is drawn as clusters of small grains that darken when wet.
@@ -126,6 +126,7 @@ cmake --build build-demo
 | `B` box, `O` ball | Place a collider |
 | `E` erase | Remove what is under the brush; click a box or ball to delete it |
 | `K`, `X`, `Space` | Container on or off, clear everything, pause |
+| `T` | Switch between the dark and light theme |
 | Right drag, middle drag, wheel | Orbit, pan, zoom |
 | `Shift` + wheel, `[` `]` | Brush size |
 | `F1` to `F4`, `F5` | Example scenes, back to the empty sandbox |
