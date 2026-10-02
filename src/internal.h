@@ -9,7 +9,9 @@
 #define SL_MAX_COLORS 64
 #define SL_CALM_STEPS 30
 
-enum { F_FLUID = 1, F_PINNED = 2, F_TOUCH = 4, F_AWAKE = 8, F_WET = 16 };
+enum { F_FLUID = 1, F_PINNED = 2, F_TOUCH = 4, F_AWAKE = 8, F_WET = 16, F_GRAB = 32 };
+#define F_KINEMATIC (F_PINNED | F_GRAB)   /* moved only by the user, never by the solver */
+#define SL_MAX_GRABS 16
 
 typedef struct {
     sl_collider_desc desc;
@@ -18,7 +20,10 @@ typedef struct {
     sl_vec3 pos_t, pos_t0;   /* frame at the current substep and the one before */
     quat rot_t, rot_t0;
     sl_vec3 force;
+    int enabled, removed;
 } collider;
+
+typedef struct { sl_particle id; sl_vec3 from, to; } grab;
 
 typedef struct { int i, j; float lift; int color; } contact;   /* lift: shock propagation factor */
 typedef struct { int a, b; float rest, compliance; int obj; } dist_con;
@@ -62,7 +67,8 @@ struct sl_world {
     sl_vec3 *x, *p, *v, *x_step, *x_build, *delta, *tmp;
     sl_vec3 *push;               /* per slot, 2 entries: impulse given to colliders last awake step */
     float *lambda, *inv_mass, *mass;
-    unsigned char *flags, *calm, *mat, *push_id;   /* push_id: 2 per slot, collider + 1 or 0 */
+    unsigned char *flags, *calm, *mat, *wet, *near_fluid, *push_id;   /* push_id: 2 per slot, collider + 1 or 0 */
+    sl_vec3 *aniso;              /* 4 per slot when enabled: center, then three axes */
     int *id, *obj, *island, *order;
 
     /* stable ids */
@@ -82,7 +88,7 @@ struct sl_world {
     int contact_count, contact_cap, contact_tmp_cap, color_off[SL_MAX_COLORS + 2];
     int *active, active_count;
     int *island_calm, island_count, island_cap;
-    int need_rebuild, rebuilds;
+    int need_rebuild, rebuilds, built;   /* built: particle count when neighbor lists were made */
 
     object *objects;
     int object_count, object_cap;
@@ -95,6 +101,15 @@ struct sl_world {
     int member_count, member_cap;
     int *mem_off, *mem_list, mem_list_cap, mem_dirty;   /* per slot: indices into members */
 
+
+    grab grabs[SL_MAX_GRABS];
+    int grab_count;
+
+    int use_aniso, max_diffuse, diffuse_count;
+    unsigned step_count;
+    sl_vec3 *dpos, *dvel;
+    float *dlife;
+    unsigned char *dkind;
 
     sl_task_system tasks;
     sl_pool *pool;
@@ -128,7 +143,13 @@ float wall_density(sl_world *w, int i, sl_vec3 *grad, float scale);
 void book_push(sl_world *w, int i, int collider, sl_vec3 impulse);
 void solve_colliders(sl_world *w);
 void solve_substep(sl_world *w, float t);
+void stabilize(sl_world *w);
+void move_grabs(sl_world *w, float t);
 void fluid_step(sl_world *w);
+void anisotropy_step(sl_world *w);
+void diffuse_step(sl_world *w);
+int grid_fluid_near(sl_world *w, sl_vec3 x, sl_vec3 *avg_vel);
+float collider_distance(const collider *col, sl_vec3 p, sl_vec3 *n);
 void objects_substep(sl_world *w);
 void objects_solve(sl_world *w);
 void objects_plasticity(sl_world *w);

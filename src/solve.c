@@ -7,7 +7,7 @@ static void predict(sl_world *w, int begin, int end, int chunk, void *ctx) {
     sl_vec3 dv = v3_scale(w->gravity, w->hs);
     for (int k = begin; k < end; k++) {
         int i = w->active[k];
-        if (!(w->flags[i] & F_PINNED)) w->v[i] = v3_add(w->v[i], dv);
+        if (!(w->flags[i] & F_KINEMATIC)) w->v[i] = v3_add(w->v[i], dv);
         w->p[i] = v3_madd(w->x[i], w->v[i], w->hs);
     }
 }
@@ -52,13 +52,17 @@ static void fluid_delta(sl_world *w, int begin, int end, int chunk, void *ctx) {
         w->delta[i] = v3(0, 0, 0);
         sl_vec3 dp = v3(0, 0, 0), pi = w->p[i];
         if (!(w->flags[i] & F_FLUID)) {
-            if (w->flags[i] & F_PINNED) continue;
+            if (w->flags[i] & F_KINEMATIC) continue;
+            float wet2 = 1.44f * w->spacing * w->spacing;
+            /* Other threads read flags[i] in this pass, so wetness goes to its own byte first. */
+            w->near_fluid[i] = 0;
             for (int n = w->nbr_off[i]; n < w->nbr_off[i + 1]; n++) {
                 int j = w->nbr[n];
-                if (!(w->flags[j] & F_FLUID) || w->lambda[j] == 0) continue;
+                if (!(w->flags[j] & F_FLUID)) continue;
                 sl_vec3 d = v3_sub(pi, w->p[j]);
                 float r2 = v3_len2(d);
-                if (r2 >= h2 || r2 < 1e-18f) continue;
+                if (r2 < wet2) w->near_fluid[i] = 1;
+                if (r2 >= h2 || r2 < 1e-18f || w->lambda[j] == 0) continue;
                 float r = sqrtf(r2);
                 dp = v3_madd(dp, d, w->mass[j] / w->mass[i] * w->lambda[j] * kernel_grad(r, h) * inv_rest / r);
             }
@@ -88,7 +92,8 @@ static void apply_delta(sl_world *w, int begin, int end, int chunk, void *ctx) {
     (void)chunk; (void)ctx;
     for (int k = begin; k < end; k++) {
         int i = w->active[k];
-        if (!(w->flags[i] & F_PINNED)) w->p[i] = v3_add(w->p[i], w->delta[i]);
+        if (!(w->flags[i] & F_KINEMATIC)) w->p[i] = v3_add(w->p[i], w->delta[i]);
+        if (!(w->flags[i] & F_FLUID) && w->near_fluid[i]) w->flags[i] |= F_WET;
     }
 }
 
@@ -101,7 +106,9 @@ static void solve_contact_range(sl_world *w, int begin, int end, int chunk, void
         const contact *c = &w->contacts[k];
         int i = c->i, j = c->j;
         if (!(w->flags[i] & F_AWAKE)) continue;
-        float dist = d0, mu = 0.5f * (w->materials[w->mat[i]].friction + w->materials[w->mat[j]].friction);
+        const sl_material_desc *mi = &w->materials[w->mat[i]], *mj = &w->materials[w->mat[j]];
+        float dist = d0, mu = 0.5f * (mi->friction + mj->friction), glue = 0;
+        if (w->wet[i] && w->wet[j]) glue = 0.5f * (mi->wet_cohesion + mj->wet_cohesion) * (float)(w->wet[i] < w->wet[j] ? w->wet[i] : w->wet[j]) / 255.0f;
         if (w->obj[i] >= 0 && w->obj[i] == w->obj[j]) {
             dist = w->objects[w->obj[i]].self_dist;
             if (w->objects[w->obj[i]].kind == OBJ_SOFT) mu = 0;
@@ -110,9 +117,17 @@ static void solve_contact_range(sl_world *w, int begin, int end, int chunk, void
         if ((w->flags[i] | w->flags[j]) & F_FLUID) { mu = 0; dist = 0.8f * d0; }
         sl_vec3 d = v3_sub(w->p[i], w->p[j]);
         float r2 = v3_len2(d);
-        if (r2 >= dist * dist || r2 < 1e-18f) continue;
         float wi = w->inv_mass[i] * c->lift, wj = w->inv_mass[j], ws = wi + wj;
-        if (ws <= 0) continue;
+        if (r2 < 1e-18f || ws <= 0) continue;
+        if (r2 >= dist * dist) {
+            /* Wet grains a little apart pull together, which is what lets wet sand clump and hold a shape. */
+            if (glue > 0 && r2 < 1.5625f * dist * dist) {
+                float r = sqrtf(r2), pull = 0.25f * glue * (r - dist) / r;
+                w->p[i] = v3_madd(w->p[i], d, -pull * wi / ws);
+                w->p[j] = v3_madd(w->p[j], d, pull * wj / ws);
+            }
+            continue;
+        }
         float r = sqrtf(r2), pen = dist - r;
         sl_vec3 n = v3_scale(d, 1.0f / r);
         w->flags[i] |= F_TOUCH | (w->flags[j] & F_FLUID ? F_WET : 0);
@@ -127,6 +142,36 @@ static void solve_contact_range(sl_world *w, int begin, int end, int chunk, void
         float f = tl < mu * pen ? 1.0f : fminf(mu * pen / tl, 1.0f);
         w->p[i] = v3_madd(w->p[i], tan, -f * wi / ws);
         w->p[j] = v3_madd(w->p[j], tan, f * wj / ws);
+    }
+}
+
+/* Overlap that already exists at the start of a step is removed in position only, so spawning grains
+   into each other cannot launch them; this is pre-stabilization from Macklin's unified particle paper. */
+static void stabilize_range(sl_world *w, int begin, int end, int chunk, void *ctx) {
+    (void)chunk;
+    int base = *(int *)ctx;
+    float d0 = w->spacing;
+    for (int k = base + begin; k < base + end; k++) {
+        const contact *c = &w->contacts[k];
+        int i = c->i, j = c->j;
+        if (!(w->flags[i] & F_AWAKE) || (w->obj[i] >= 0 && w->obj[i] == w->obj[j])) continue;
+        float dist = (w->flags[i] | w->flags[j]) & F_FLUID ? 0.8f * d0 : d0;
+        sl_vec3 d = v3_sub(w->x[i], w->x[j]);
+        float r2 = v3_len2(d), wi = w->inv_mass[i], wj = w->inv_mass[j], ws = wi + wj;
+        if (r2 >= dist * dist || r2 < 1e-18f || ws <= 0) continue;
+        float r = sqrtf(r2), pen = dist - r;
+        sl_vec3 n = v3_scale(d, 1.0f / r);
+        w->x[i] = v3_madd(w->x[i], n, pen * wi / ws);
+        w->x[j] = v3_madd(w->x[j], n, -pen * wj / ws);
+    }
+}
+
+void stabilize(sl_world *w) {
+    for (int color = 0; color <= SL_MAX_COLORS; color++) {
+        int base = w->color_off[color], count = w->color_off[color + 1] - base;
+        if (count <= 0) continue;
+        if (color == SL_MAX_COLORS || count < SL_CHUNK) stabilize_range(w, 0, count, 0, &base);
+        else sl__parallel(w, count, stabilize_range, &base);
     }
 }
 
@@ -216,10 +261,19 @@ static void copy_velocity(sl_world *w, int begin, int end, int chunk, void *ctx)
     for (int k = begin; k < end; k++) w->v[w->active[k]] = w->delta[w->active[k]];
 }
 
+/* Grabbed particles sweep from last step's target to the new one, so they move smoothly and can be thrown. */
+void move_grabs(sl_world *w, float t) {
+    for (int g = 0; g < w->grab_count; g++) {
+        int id = w->grabs[g].id, s = id >= 0 && id < w->next_id ? w->id_slot[id] : -1;
+        if (s >= 0 && s < w->count && w->id[s] == id) w->p[s] = v3_lerp(w->grabs[g].from, w->grabs[g].to, t);
+    }
+}
+
 void solve_substep(sl_world *w, float t) {
     int n = w->active_count;
     collider_frames(w, t);
     sl__parallel(w, n, predict, NULL);
+    move_grabs(w, t);
 
     int fluids = 0;
     for (int m = 0; m < w->material_count; m++) fluids |= w->materials[m].kind == SL_FLUID;

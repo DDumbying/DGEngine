@@ -43,10 +43,12 @@ static int slot_arrays(sl_world *w, slot_array *out) {
     for (size_t i = 0; i < sizeof vecs / sizeof vecs[0]; i++) out[n++] = (slot_array){vecs[i], sizeof(sl_vec3), 0};
     void **floats[] = {(void **)&w->lambda, (void **)&w->inv_mass, (void **)&w->mass};
     for (size_t i = 0; i < sizeof floats / sizeof floats[0]; i++) out[n++] = (slot_array){floats[i], sizeof(float), 0};
-    void **bytes[] = {(void **)&w->flags, (void **)&w->calm, (void **)&w->mat};
+    void **bytes[] = {(void **)&w->flags, (void **)&w->calm, (void **)&w->mat, (void **)&w->wet};
     for (size_t i = 0; i < sizeof bytes / sizeof bytes[0]; i++) out[n++] = (slot_array){bytes[i], 1, 0};
     out[n++] = (slot_array){(void **)&w->push, 2 * sizeof(sl_vec3), 0};
     out[n++] = (slot_array){(void **)&w->push_id, 2, 0};
+    out[n++] = (slot_array){(void **)&w->near_fluid, 1, 0};
+    if (w->use_aniso) out[n++] = (slot_array){(void **)&w->aniso, 4 * sizeof(sl_vec3), 0};
     void **ints[] = {(void **)&w->id, (void **)&w->obj, (void **)&w->island,
                      (void **)&w->g.bucket, (void **)&w->g.sorted, (void **)&w->active, (void **)&w->id_slot, (void **)&w->free_ids};
     for (size_t i = 0; i < sizeof ints / sizeof ints[0]; i++) out[n++] = (slot_array){ints[i], sizeof(int), 0};
@@ -104,7 +106,16 @@ sl_world *sl_world_create(const sl_world_desc *desc) {
     w->gravity = desc->gravity;
     w->g.cell = w->h + w->skin;
     w->tasks = desc->tasks;
+    w->use_aniso = desc->anisotropy != 0;
+    w->max_diffuse = desc->max_diffuse > 0 ? desc->max_diffuse : 0;
     wall_table_init(w);
+    if (w->max_diffuse) {
+        w->dpos = sl__alloc(w, (size_t)w->max_diffuse * sizeof(sl_vec3));
+        w->dvel = sl__alloc(w, (size_t)w->max_diffuse * sizeof(sl_vec3));
+        w->dlife = sl__alloc(w, (size_t)w->max_diffuse * sizeof(float));
+        w->dkind = sl__alloc(w, (size_t)w->max_diffuse);
+        if (!w->dpos || !w->dvel || !w->dlife || !w->dkind) { sl_world_destroy(w); return NULL; }
+    }
 
     if (!grow_slots(w, desc->max_particles < 1024 ? desc->max_particles : 1024)) { sl_world_destroy(w); return NULL; }
     if (!w->tasks.parallel_for && desc->workers > 1) {
@@ -133,6 +144,10 @@ void sl_world_destroy(sl_world *w) {
     sl__free(w, w->clusters);
     sl__free(w, w->members);
     sl__free(w, w->mem_list);
+    sl__free(w, w->dpos);
+    sl__free(w, w->dvel);
+    sl__free(w, w->dlife);
+    sl__free(w, w->dkind);
     sl_allocator a = w->alloc;
     a.free(w, a.user);
 }
@@ -166,6 +181,14 @@ sl_particle sl_spawn(sl_world *w, sl_material m, sl_vec3 pos, sl_vec3 vel) {
     w->calm[s] = 0;
     w->obj[s] = -1;
     w->push_id[2 * s] = w->push_id[2 * s + 1] = 0;
+    w->wet[s] = 0;
+    if (w->use_aniso) {
+        float r = w->radius;
+        w->aniso[4 * s] = pos;
+        w->aniso[4 * s + 1] = v3(r, 0, 0);
+        w->aniso[4 * s + 2] = v3(0, r, 0);
+        w->aniso[4 * s + 3] = v3(0, 0, r);
+    }
     w->id[s] = id;
     w->id_slot[id] = s;
     w->need_rebuild = 1;
@@ -211,7 +234,8 @@ static void remove_slot(sl_world *w, int s) {
         w->x[s] = w->x[last]; w->p[s] = w->p[last]; w->v[s] = w->v[last];
         w->x_step[s] = w->x_step[last]; w->x_build[s] = w->x_build[last];
         w->inv_mass[s] = w->inv_mass[last]; w->mass[s] = w->mass[last];
-        w->flags[s] = w->flags[last]; w->calm[s] = w->calm[last]; w->mat[s] = w->mat[last];
+        w->flags[s] = w->flags[last]; w->calm[s] = w->calm[last]; w->mat[s] = w->mat[last]; w->wet[s] = w->wet[last];
+        if (w->use_aniso) for (int k = 0; k < 4; k++) w->aniso[4 * s + k] = w->aniso[4 * last + k];
         w->id[s] = w->id[last]; w->obj[s] = w->obj[last];
         w->push[2 * s] = w->push[2 * last]; w->push[2 * s + 1] = w->push[2 * last + 1];
         w->push_id[2 * s] = w->push_id[2 * last]; w->push_id[2 * s + 1] = w->push_id[2 * last + 1];
@@ -240,6 +264,8 @@ void sl_clear(sl_world *w) {
     for (int i = 0; i < w->object_count; i++) sl__free(w, w->objects[i].ids);
     w->object_count = w->dist_count = w->cluster_count = w->member_count = 0;
     w->count = w->free_count = w->next_id = 0;
+    w->grab_count = 0;
+    w->diffuse_count = 0;
     w->need_rebuild = 1;
 }
 
@@ -281,7 +307,10 @@ void sl_pin(sl_world *w, sl_particle p, int pinned) {
     int s = slot_of(w, p);
     if (s < 0) return;
     if (pinned) { w->flags[s] |= F_PINNED; w->inv_mass[s] = 0; w->v[s] = v3(0, 0, 0); }
-    else { w->flags[s] &= (unsigned char)~F_PINNED; w->inv_mass[s] = 1.0f / w->mass[s]; }
+    else {
+        w->flags[s] &= (unsigned char)~F_PINNED;
+        if (!(w->flags[s] & F_GRAB)) w->inv_mass[s] = 1.0f / w->mass[s];
+    }
     w->calm[s] = 0;
 }
 
@@ -295,9 +324,13 @@ static float bound_radius(const sl_collider_desc *d) {
 }
 
 sl_collider sl_collider_add(sl_world *w, const sl_collider_desc *desc) {
-    if (!w || !desc || w->collider_count >= SL_MAX_COLLIDERS) return -1;
-    collider *c = &w->colliders[w->collider_count];
+    if (!w || !desc) return -1;
+    int slot = 0;
+    while (slot < w->collider_count && !w->colliders[slot].removed) slot++;
+    if (slot >= SL_MAX_COLLIDERS) return -1;
+    collider *c = &w->colliders[slot];
     memset(c, 0, sizeof *c);
+    c->enabled = 1;
     c->desc = *desc;
     if (c->desc.shape == SL_PLANE) {
         sl_vec3 n = c->desc.normal;
@@ -308,7 +341,114 @@ sl_collider sl_collider_add(sl_world *w, const sl_collider_desc *desc) {
     c->prev_pos = desc->position;
     if (c->desc.inside) for (int s = 0; s < w->count; s++) w->calm[s] = 0;
     else wake_near(w, desc->position, bound_radius(&c->desc) + w->h);
-    return w->collider_count++;
+    if (slot == w->collider_count) w->collider_count++;
+    return slot;
+}
+
+static int valid_collider(const sl_world *w, sl_collider c) {
+    return w && c >= 0 && c < w->collider_count && !w->colliders[c].removed;
+}
+
+static void wake_collider(sl_world *w, sl_collider c) {
+    const sl_collider_desc *d = &w->colliders[c].desc;
+    if (d->inside || d->shape == SL_PLANE) for (int s = 0; s < w->count; s++) w->calm[s] = 0;
+    else wake_near(w, d->position, bound_radius(d) + w->h);
+}
+
+void sl_collider_set_enabled(sl_world *w, sl_collider c, int enabled) {
+    if (!valid_collider(w, c) || w->colliders[c].enabled == !!enabled) return;
+    w->colliders[c].enabled = !!enabled;
+    w->colliders[c].force = v3(0, 0, 0);
+    wake_collider(w, c);
+}
+
+int sl_collider_enabled(const sl_world *w, sl_collider c) { return valid_collider(w, c) && w->colliders[c].enabled; }
+
+void sl_collider_remove(sl_world *w, sl_collider c) {
+    if (!valid_collider(w, c)) return;
+    wake_collider(w, c);
+    w->colliders[c].enabled = 0;
+    w->colliders[c].removed = 1;
+    unsigned char id = (unsigned char)(c + 1);
+    for (int k = 0; k < 2 * w->count; k++)
+        if (w->push_id[k] == id) { w->push_id[k] = 0; w->push[k] = v3(0, 0, 0); }
+    while (w->collider_count > 0 && w->colliders[w->collider_count - 1].removed) w->collider_count--;
+}
+
+/* Nearest particle hit by a ray, -1 if none within max_dist. */
+sl_particle sl_raycast(const sl_world *w, sl_vec3 origin, sl_vec3 dir, float max_dist, float *hit_dist) {
+    if (!w) return -1;
+    float len = v3_len(dir);
+    if (len < 1e-12f) return -1;
+    dir = v3_scale(dir, 1.0f / len);
+    float best = max_dist, r2 = w->radius * w->radius;
+    int hit = -1;
+    for (int s = 0; s < w->count; s++) {
+        sl_vec3 oc = v3_sub(w->x[s], origin);
+        float along = v3_dot(oc, dir), off2 = v3_len2(oc) - along * along;
+        if (off2 > r2) continue;
+        float t = along - sqrtf(r2 - off2);
+        if (t < 0) t = along + sqrtf(r2 - off2);
+        if (t >= 0 && t < best) { best = t; hit = s; }
+    }
+    if (hit < 0) return -1;
+    if (hit_dist) *hit_dist = best;
+    return w->id[hit];
+}
+
+static int find_grab(const sl_world *w, sl_particle p) {
+    for (int g = 0; g < w->grab_count; g++) if (w->grabs[g].id == p) return g;
+    return -1;
+}
+
+int sl_grab_begin(sl_world *w, sl_particle p) {
+    int s = slot_of(w, p);
+    if (s < 0 || find_grab(w, p) >= 0 || w->grab_count >= SL_MAX_GRABS) return 0;
+    w->grabs[w->grab_count++] = (grab){p, w->x[s], w->x[s]};
+    w->flags[s] |= F_GRAB;
+    w->inv_mass[s] = 0;
+    w->calm[s] = 0;
+    return 1;
+}
+
+void sl_grab_move(sl_world *w, sl_particle p, sl_vec3 target) {
+    int g = w ? find_grab(w, p) : -1;
+    if (g >= 0 && v3_finite(target)) w->grabs[g].to = target;
+}
+
+void sl_grab_end(sl_world *w, sl_particle p) {
+    int g = w ? find_grab(w, p) : -1;
+    if (g < 0) return;
+    w->grabs[g] = w->grabs[--w->grab_count];
+    int s = slot_of(w, p);
+    if (s < 0) return;
+    w->flags[s] &= (unsigned char)~F_GRAB;
+    if (!(w->flags[s] & F_PINNED)) w->inv_mass[s] = 1.0f / w->mass[s];
+    w->calm[s] = 0;
+}
+
+/* Removes loose particles inside the sphere and whole objects that reach into it. */
+int sl_remove_sphere(sl_world *w, sl_vec3 center, float radius) {
+    if (!w || !(radius > 0)) return 0;
+    int removed = 0, before;
+    for (int s = w->count - 1; s >= 0; s--) {
+        if (v3_len2(v3_sub(w->x[s], center)) > radius * radius) continue;
+        int o = w->obj[s];
+        if (o >= 0) {
+            before = w->count;
+            sl_object_destroy(w, o);
+            removed += before - w->count;
+            if (s > w->count) s = w->count;
+            continue;
+        }
+        sl_particle id = w->id[s];
+        int g = find_grab(w, id);
+        if (g >= 0) w->grabs[g] = w->grabs[--w->grab_count];
+        wake_near(w, w->x[s], w->h * 2);
+        remove_slot(w, s);
+        removed++;
+    }
+    return removed;
 }
 
 void sl_collider_move(sl_world *w, sl_collider id, sl_vec3 position, const float rotation[4]) {
@@ -330,7 +470,7 @@ static void wake_for_colliders(sl_world *w) {
         sl_vec3 a = col->prev_pos, b = col->desc.position;
         quat q0 = col->prev_rot, q1 = col->rot;
         int moved = a.x != b.x || a.y != b.y || a.z != b.z || q0.x != q1.x || q0.y != q1.y || q0.z != q1.z || q0.w != q1.w;
-        if (!moved) continue;
+        if (!moved || !col->enabled) continue;
         float reach = bound_radius(&col->desc) + w->h + w->spacing;
         if (col->desc.shape == SL_PLANE || col->desc.inside) {
             for (int s = 0; s < w->count; s++) w->calm[s] = 0;
@@ -381,12 +521,13 @@ static void end_step(sl_world *w, int begin, int end, int chunk, void *ctx) {
         if (!v3_finite(w->x[s]) || !v3_finite(w->v[s])) { w->x[s] = w->p[s] = w->x_step[s]; w->v[s] = v3(0, 0, 0); }
         if (w->sleep_speed <= 0) continue;
         int still = v3_len2(v3_scale(v3_sub(w->x[s], w->x_step[s]), 1.0f / w->dt)) < slow;
-        /* Grains touching fluid are not held, or the hold would undo the push that keeps the two apart. */
-        if (still && (w->flags[s] & (F_TOUCH | F_FLUID | F_WET)) == F_TOUCH && w->obj[s] < 0) {
+        if (still && (w->flags[s] & (F_TOUCH | F_FLUID)) == F_TOUCH && w->obj[s] < 0) {
             w->x[s] = w->p[s] = w->x_step[s];
             w->v[s] = v3(0, 0, 0);
         }
         w->calm[s] = still ? (w->calm[s] < 255 ? w->calm[s] + 1 : 255) : 0;
+        if (w->flags[s] & F_WET) w->wet[s] = 255;
+        else if (w->wet[s]) w->wet[s]--;
     }
 }
 
@@ -397,17 +538,28 @@ void sl_step(sl_world *w, float dt) {
     if (w->pool) pool_wake(w->pool);
 
     wake_for_colliders(w);
+    for (int g = 0; g < w->grab_count; g++) {
+        int s = slot_of(w, w->grabs[g].id);
+        if (s >= 0) w->calm[s] = 0;
+        else w->grabs[g--] = w->grabs[--w->grab_count];
+    }
     if (w->mem_dirty && objects_membership(w)) w->mem_dirty = 0;
     if (!w->need_rebuild) update_islands(w);
     refresh(w, 1);
 
+    stabilize(w);
+    stabilize(w);
     sl__parallel(w, w->active_count, begin_step, NULL);
     for (int s = 0; s < w->substeps; s++) {
         if (s > 0) refresh(w, 0);
         solve_substep(w, (float)(s + 1) / (float)w->substeps);
     }
     fluid_step(w);
+    for (int g = 0; g < w->grab_count; g++) w->grabs[g].from = w->grabs[g].to;
     sl__parallel(w, w->active_count, end_step, NULL);
+    if (w->max_diffuse) diffuse_step(w);
+    if (w->use_aniso) anisotropy_step(w);
+    w->step_count++;
     objects_plasticity(w);
 
     for (int c = 0; c < w->collider_count; c++) w->colliders[c].force = v3(0, 0, 0);
@@ -429,6 +581,17 @@ const sl_vec3 *sl_positions(const sl_world *w) { return w ? w->x : NULL; }
 const sl_vec3 *sl_velocities(const sl_world *w) { return w ? w->v : NULL; }
 float sl_particle_radius(const sl_world *w) { return w ? w->radius : 0.0f; }
 const sl_particle *sl_ids(const sl_world *w) { return w ? w->id : NULL; }
+const unsigned char *sl_wetness(const sl_world *w) { return w ? w->wet : NULL; }
+const sl_vec3 *sl_anisotropy(const sl_world *w) { return w && w->use_aniso ? w->aniso : NULL; }
+
+int sl_diffuse(const sl_world *w, const sl_vec3 **positions, const sl_vec3 **velocities, const unsigned char **kinds,
+               const float **life) {
+    if (positions) *positions = w ? w->dpos : NULL;
+    if (velocities) *velocities = w ? w->dvel : NULL;
+    if (kinds) *kinds = w ? w->dkind : NULL;
+    if (life) *life = w ? w->dlife : NULL;
+    return w ? w->diffuse_count : 0;
+}
 
 /* Materials are stored as bytes; this view is rebuilt on request into a scratch array. */
 const sl_material *sl_materials(const sl_world *w) {
@@ -447,10 +610,10 @@ void sl_get_stats(const sl_world *w, sl_stats *out) {
     out->contacts = w->contact_count;
     out->islands = w->island_count;
     out->rebuilds = w->rebuilds;
-    size_t per_slot = 9 * sizeof(sl_vec3) + 3 * sizeof(float) + 5 + 11 * sizeof(int);
+    size_t per_slot = (w->use_aniso ? 13 : 9) * sizeof(sl_vec3) + 3 * sizeof(float) + 7 + 11 * sizeof(int);
     out->memory_bytes = sizeof *w + (size_t)w->cap * per_slot + (size_t)w->g.start_cap * sizeof(int)
         + (size_t)(w->nbr_cap + w->nbr_r_cap) * sizeof(int) + (size_t)(w->contact_cap + w->contact_tmp_cap) * sizeof(contact)
         + (size_t)w->island_cap * sizeof(int) + (size_t)w->mem_list_cap * sizeof(int)
  + (size_t)w->dist_cap * sizeof(dist_con) + (size_t)w->dist_lambda_cap * sizeof(float)
-        + (size_t)w->member_cap * sizeof(member) + (size_t)w->cluster_cap * sizeof(cluster);
+        + (size_t)w->member_cap * sizeof(member) + (size_t)w->max_diffuse * (2 * sizeof(sl_vec3) + sizeof(float) + 1) + (size_t)w->cluster_cap * sizeof(cluster);
 }

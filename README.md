@@ -6,6 +6,8 @@ soft, squishy bodies that wobble and dent. Everything is made of particles in on
 position based dynamics with many small substeps, the same family of methods used by NVIDIA FleX
 and Obi.
 
+![sandbox](docs/sandbox.png)
+
 | | |
 |---|---|
 | ![water and sand](docs/water.png) | ![slime](docs/slime.png) |
@@ -29,16 +31,19 @@ portable, engine-agnostic option:
 | Feature | Notes |
 |---|---|
 | Fluids | Position based fluids, viscosity, cohesion, vorticity, walls that hold water at rest density |
-| Granular | Friction, piling with shock propagation, settles still |
+| Granular | Friction sets the pile angle, shock propagation, settles still; wet grains darken and stick |
 | Ropes and cloth | Distance and bending constraints with compliance, pinning |
 | Soft bodies | Shape matching with stiffness and plasticity, so they can keep dents |
 | Two-way coupling | Water pushes solids: light bodies float, heavy ones sink, cloth gets pushed |
 | Colliders | Plane, box, sphere, capsule; moving and rotating; boxes can be containers |
 | Collider forces | Read the force particles put on each collider and feed it to a rigid-body engine |
+| Interaction | Ray picking, grab and throw any particle, enable or remove colliders, erase a region |
+| Water surface | Per-particle ellipsoids (anisotropy) so renderers draw flat sheets instead of balls |
+| Spray and foam | Diffuse particles thrown off by fast water: spray, foam riding the surface, rising bubbles |
 | Stable ids | Particle handles stay valid while memory is reordered for speed |
 | Sleeping | Calm islands of particles stop simulating until something touches them |
 | Threads | Built-in pool, or plug in your own job system |
-| Robustness | Swept tests stop fast particles tunneling through thin walls; bad values are caught |
+| Robustness | Swept tests stop tunneling, overlaps are removed without launching particles, bad values are caught |
 
 ## Example
 
@@ -99,8 +104,10 @@ target_link_libraries(your_game PRIVATE slime)
 ### Demo
 
 The demo uses [raylib](https://www.raylib.com). If raylib 5.5 is not installed, CMake fetches it.
-Water and slime are drawn with screen-space fluid rendering: particle depth is smoothed into one
-surface, then shaded with refraction, absorption and reflection.
+It opens an empty sandbox: pick a tool and build whatever you like. Water and slime are drawn with
+screen-space fluid rendering from the ellipsoids slime computes, smoothed into one surface and
+shaded with refraction, absorption and sky reflection; spray and foam are soft white specks; sand
+is drawn as clusters of small grains that darken when wet.
 
 ```sh
 cmake -B build-demo -DSLIME_BUILD_DEMO=ON
@@ -110,11 +117,18 @@ cmake --build build-demo
 
 | Input | Action |
 |---|---|
-| `1` to `4` | Scenes: water and sand, rope bridge, curtain, slime |
-| `W` (hold), `S`, `G` | Pour water, drop sand, drop a slime blob |
-| Arrows, `PgUp`, `PgDn` | Move the red ball |
-| Right mouse drag, wheel | Orbit, zoom |
-| `Space`, `R` | Pause, reset |
+| Left mouse | Use the tool (or click one in the toolbar) |
+| `G` grab | Drag any particle, slime, cloth or rope; release to throw. Drag boxes and balls too |
+| `P` push | A sphere under the cursor stirs water and sand |
+| `W` water, `S` sand | Pour while held |
+| `M` slime, `C` cloth | Drop a slime blob or a cloth sheet (`Shift` pins the cloth's edge) |
+| `R` rope | Drag from one point to another for a rope pinned at both ends |
+| `B` box, `O` ball | Place a collider |
+| `E` erase | Remove what is under the brush; click a box or ball to delete it |
+| `K`, `X`, `Space` | Container on or off, clear everything, pause |
+| Right drag, middle drag, wheel | Orbit, pan, zoom |
+| `Shift` + wheel, `[` `]` | Brush size |
+| `F1` to `F4`, `F5` | Example scenes, back to the empty sandbox |
 
 ## Using slime with a rigid-body engine
 
@@ -146,28 +160,31 @@ reordered in memory by grid cell so neighbors are close in cache. Then, for each
    shape matching and colliders, a few passes each.
 4. Derive velocities from the position change.
 
-After the substeps, viscosity, vorticity and cohesion run once, then each particle checks whether
-it is calm. Groups of particles that can touch each other form islands, and an island that has been
+Before the substeps, overlaps that already exist are pushed apart in position only, so spawning
+particles into each other cannot launch them. After the substeps, viscosity, vorticity and
+cohesion run once, spray and foam are spawned and moved, surface ellipsoids are computed if asked
+for, then each particle checks whether it is calm. Groups of particles that can touch each other form islands, and an island that has been
 calm for half a second sleeps until something wakes it.
 
 ## Performance
 
-`slime_bench` on a 4 vCPU 2.1 GHz cloud Xeon, `Release` build. "First 1 s" is a dam break of water
-next to a sand block, the most violent part; "after 26 s" is the same scene once it has settled.
+`slime_bench` on a 4 vCPU 2.1 GHz cloud Xeon, `Release` build. "First 1 s" is the most violent
+part of each scene; "after 26 s" is the same scene later on.
 
-| Particles | Threads | First 1 s, ms/step | After 26 s, ms/step |
-|---|---|---|---|
-| 1,500 | 1 | 7.4 | 0.03 |
-| 1,500 | 4 | 3.9 | 0.02 |
-| 8,400 | 1 | 48.7 | 0.11 |
-| 8,400 | 4 | 22.6 | 0.28 |
-| 14,000 | 1 | 90.1 | 0.26 |
-| 14,000 | 4 | 40.3 | 0.32 |
+| Scene | Particles | Threads | First 1 s, ms/step | After 26 s, ms/step |
+|---|---|---|---|---|
+| Dam break next to sand | 1,500 | 4 | 3.8 | 0.02 (asleep) |
+| Dam break next to sand | 8,400 | 1 | 54.8 | 41.9 |
+| Dam break next to sand | 8,400 | 4 | 26.1 | 14.2 |
+| Dam break next to sand | 14,000 | 4 | 35.3 | 24.5 |
+| Water pool | 5,500 | 4 | 13.7 | 0.02 (asleep) |
+| Water pool with ellipsoids and spray | 8,400 | 4 | 23.6 | 16.0 |
 
-Memory is about 700 to 850 bytes per particle, including headroom for the busiest moment. The
+Calm scenes sleep and cost almost nothing. In the larger sand scenes water is still seeping
+through the sand after 26 seconds, so they are still awake. Memory is about 700 to 900 bytes per
+particle, a little more with surface ellipsoids, including headroom for the busiest moment. The
 violent case is still slower than the goal of 10k particles under 8 ms on 4 cores; the remaining
-costs are the fluid pressure passes and the neighbor rebuilds that fast water needs, and they are
-the next things to work on.
+costs are the fluid pressure passes and the neighbor rebuilds that fast water needs.
 
 ## Notes
 
@@ -176,6 +193,9 @@ the next things to work on.
   different compilers or platforms are not promised yet.
 - Grains heavier than water sink but come to rest on a thin cushion of water about two particles
   above the floor, because the particle fluid is very slightly compressible with depth.
+- Sand is porous: water seeps through a pile, so a soaked pile keeps slowly settling for a while
+  before it sleeps.
+- Grains do not spin, so friction alone sets how steep a pile gets (about 40 degrees at 1.0).
 - Particles that belong to a rope, cloth or soft body are removed with `sl_object_destroy`.
 
 ## License

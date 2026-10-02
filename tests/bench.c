@@ -9,12 +9,16 @@ static double now(void) {
     return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
 }
 
+static int extras;
+
 static sl_world *scene(int workers, float size, int with_sand) {
     sl_world_desc d = {0};
     d.max_particles = 200000;
     d.particle_radius = 0.05f;
     d.gravity = (sl_vec3){0, -9.81f, 0};
     d.workers = workers;
+    d.anisotropy = extras;
+    d.max_diffuse = extras ? 50000 : 0;
     sl_world *w = sl_world_create(&d);
     sl_material_desc water = {SL_FLUID, 1000, 0.01f, 0, 0, 0, 0};
     sl_material_desc sand = {SL_GRANULAR, 1600, 0, 0, 0.9f, 0, 0};
@@ -55,5 +59,7 @@ int main(int argc, char **argv) {
     for (int s = quick ? 2 : 0; s < 4; s++)
         for (int k = 1; k <= 4; k *= 4) row("dam + sand", k, sizes[s], 1);
     for (int k = 1; k <= 4; k *= 4) row("water pool", k, 1.4f, 0);
+    extras = 1;
+    for (int k = 1; k <= 4; k *= 4) row("+ surface fx", k, 1.4f, 1);
     return 0;
 }

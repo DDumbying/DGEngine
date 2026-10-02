@@ -314,7 +314,7 @@ static void match_particles(sl_world *w, int begin, int end, int chunk, void *ct
     for (int k = begin; k < end; k++) {
         int s = w->active[k];
         int first = w->mem_off[s], last = w->mem_off[s + 1];
-        if (first == last || (w->flags[s] & F_PINNED)) continue;
+        if (first == last || (w->flags[s] & F_KINEMATIC)) continue;
         sl_vec3 goal = v3(0, 0, 0);
         float stiff = 0;
         for (int q = first; q < last; q++) {
