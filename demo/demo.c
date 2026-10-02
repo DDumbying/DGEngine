@@ -21,13 +21,17 @@
 
 /* ---------- shaders ---------- */
 
+/* uDark picks the night theme (1) or the day theme (0). */
 #define SKY_GLSL \
+    "uniform float uDark;\n" \
     "vec3 sky(vec3 d) {\n" \
     "    vec3 sun = normalize(vec3(0.4, 0.75, 0.3));\n" \
-    "    float t = clamp(d.y * 1.4 + 0.15, 0.0, 1.0);\n" \
-    "    vec3 col = mix(vec3(0.86, 0.88, 0.90), vec3(0.32, 0.52, 0.82), t);\n" \
-    "    if (d.y < 0.0) col = mix(vec3(0.86, 0.88, 0.90), vec3(0.42, 0.40, 0.38), clamp(-d.y * 3.0, 0.0, 1.0));\n" \
-    "    return col + vec3(1.0, 0.9, 0.7) * pow(max(dot(d, sun), 0.0), 600.0) * 4.0;\n" \
+    "    float t = clamp(d.y * 1.4 + 0.15, 0.0, 1.0), s = max(dot(d, sun), 0.0);\n" \
+    "    vec3 hor = mix(vec3(0.86, 0.88, 0.90), vec3(0.13, 0.15, 0.20), uDark);\n" \
+    "    vec3 col = mix(hor, mix(vec3(0.32, 0.52, 0.82), vec3(0.02, 0.03, 0.06), uDark), t);\n" \
+    "    if (d.y < 0.0) col = mix(hor, mix(vec3(0.42, 0.40, 0.38), vec3(0.04, 0.04, 0.05), uDark), clamp(-d.y * 3.0, 0.0, 1.0));\n" \
+    "    vec3 glow = vec3(0.55, 0.65, 0.85) * (pow(s, 40.0) * 0.25 + pow(s, 1500.0) * 2.0);\n" \
+    "    return col + mix(vec3(1.0, 0.9, 0.7) * pow(s, 600.0) * 4.0, glow, uDark);\n" \
     "}\n"
 
 static const char *SKY_FS =
@@ -53,15 +57,18 @@ static const char *FLOOR_VS =
 static const char *FLOOR_FS =
     "#version 330\n"
     "in vec3 world;\n"
+    "uniform float uDark;\n"
     "out vec4 finalColor;\n"
     "void main() {\n"
     "    vec2 cell = floor(world.xz / 0.5);\n"
     "    float checker = mod(cell.x + cell.y, 2.0);\n"
     "    vec2 f = abs(fract(world.xz / 0.5) - 0.5);\n"
     "    float line = smoothstep(0.49, 0.5, max(f.x, f.y));\n"
-    "    vec3 col = mix(vec3(0.80, 0.78, 0.74), vec3(0.72, 0.70, 0.66), checker) * (1.0 - 0.25 * line);\n"
+    "    vec3 day = mix(vec3(0.80, 0.78, 0.74), vec3(0.72, 0.70, 0.66), checker) * (1.0 - 0.25 * line);\n"
+    "    vec3 night = mix(mix(vec3(0.14, 0.15, 0.19), vec3(0.11, 0.12, 0.15), checker), vec3(0.22, 0.24, 0.30), line);\n"
     "    float fade = clamp(1.0 - length(world.xz) / 9.0, 0.0, 1.0);\n"
-    "    finalColor = vec4(mix(vec3(0.86, 0.88, 0.90), col, fade), 1.0);\n"
+    "    vec3 hor = mix(vec3(0.86, 0.88, 0.90), vec3(0.13, 0.15, 0.20), uDark);\n"
+    "    finalColor = vec4(mix(hor, mix(day, night, uDark), fade), 1.0);\n"
     "}\n";
 
 static const char *SPHERE_VS =
@@ -80,9 +87,11 @@ static const char *SPHERE_FS =
     "#version 330\n"
     "in vec3 normal;\n"
     "uniform vec4 colDiffuse;\n"
+    "uniform float uDark;\n"
     "out vec4 finalColor;\n"
     "void main() {\n"
-    "    float light = max(dot(normalize(normal), normalize(vec3(0.4, 0.75, 0.3))), 0.0) * 0.55 + 0.5;\n"
+    "    float ndl = max(dot(normalize(normal), normalize(vec3(0.4, 0.75, 0.3))), 0.0);\n"
+    "    float light = mix(ndl * 0.55 + 0.5, ndl * 0.7 + 0.32, uDark);\n"
     "    finalColor = vec4(colDiffuse.rgb * light, 1.0);\n"
     "}\n";
 
@@ -621,6 +630,12 @@ static void renderer_init(renderer *r) {
     for (int i = 0; i < L_COUNT; i++) r->loc[i] = GetShaderLocation(*locs[i].sh, locs[i].name);
 }
 
+static void set_theme(renderer *r, int dark) {
+    float v = (float)dark;
+    Shader all[] = {r->sky, r->floor, r->sphere, r->surface};
+    for (int i = 0; i < 4; i++) SetShaderValue(all[i], GetShaderLocation(all[i], "uDark"), &v, SHADER_UNIFORM_FLOAT);
+}
+
 static Matrix ellipsoid(const sl_vec3 *a) {
     Matrix m = {0};
     m.m0 = a[1].x; m.m1 = a[1].y; m.m2 = a[1].z;
@@ -831,14 +846,16 @@ static int toolbar(Font font, tools *t, sim *s, Vector2 mouse, int click) {
         Rectangle rc = tool_rect(i);
         int over = CheckCollisionPointRec(mouse, rc);
         if (over && click) { t->tool = i; used = 1; }
-        DrawRectangleRounded(rc, 0.3f, 6, t->tool == i ? (Color){60, 110, 170, 230} : (over ? (Color){60, 66, 80, 200} : (Color){30, 34, 44, 170}));
+        DrawRectangleRounded(rc, 0.3f, 6, t->tool == i ? (Color){60, 110, 170, 230} : (over ? (Color){60, 66, 80, 210} : (Color){34, 38, 50, 200}));
+        DrawRectangleRoundedLinesEx(rc, 0.3f, 6, 1.0f, (Color){140, 150, 170, 90});
         DrawTextEx(font, TextFormat("%s  %s", TOOL_KEY_NAMES[i], TOOL_NAMES[i]), (Vector2){rc.x + 12, rc.y + 3}, 27, 1, RAYWHITE);
     }
     Rectangle box = tool_rect(T_COUNT);
     box.y += 12;
     int over = CheckCollisionPointRec(mouse, box);
     if (over && click) { set_container(s, !s->container_on); used = 1; }
-    DrawRectangleRounded(box, 0.3f, 6, s->container_on ? (Color){60, 140, 100, 230} : (Color){30, 34, 44, 170});
+    DrawRectangleRounded(box, 0.3f, 6, s->container_on ? (Color){60, 140, 100, 230} : (Color){34, 38, 50, 200});
+    DrawRectangleRoundedLinesEx(box, 0.3f, 6, 1.0f, (Color){140, 150, 170, 90});
     DrawTextEx(font, TextFormat("K  container %s", s->container_on ? "on" : "off"), (Vector2){box.x + 12, box.y + 3}, 25, 1, RAYWHITE);
     return used || CheckCollisionPointRec(mouse, (Rectangle){16, 120, 150, 38.0f * (T_COUNT + 1) + 12});
 }
@@ -901,7 +918,8 @@ int main(int argc, char **argv) {
 
     Vector3 focus = {0, 0.5f, 0};
     float yaw = 0.55f, pitch = 0.42f, dist = 3.6f;
-    int paused = 0, frame = 0;
+    int paused = 0, frame = 0, dark = 1;
+    set_theme(&r, dark);
     double step_ms = 0;
 
     while (!WindowShouldClose()) {
@@ -929,6 +947,7 @@ int main(int argc, char **argv) {
         if (IsKeyPressed(KEY_X)) scene_load(&s, 0);
         if (IsKeyPressed(KEY_K)) set_container(&s, !s.container_on);
         if (IsKeyPressed(KEY_SPACE)) paused = !paused;
+        if (IsKeyPressed(KEY_T)) set_theme(&r, dark = !dark);
         if (IsKeyPressed(KEY_LEFT_BRACKET)) t.brush = Clamp(t.brush / 1.2f, 0.04f, 0.5f);
         if (IsKeyPressed(KEY_RIGHT_BRACKET)) t.brush = Clamp(t.brush * 1.2f, 0.04f, 0.5f);
 
@@ -988,24 +1007,24 @@ int main(int argc, char **argv) {
         if (surface_pass(&r, &tg, &s, s.slime, view, proj, cam)) {
             BeginTextureMode(tg.mid.rt);
             ClearBackground(BLANK);
-            composite(&r, &tg, &tg.scene, view, proj, (Vector3){60.0f, 14.0f, 70.0f}, (Vector3){0.30f, 0.78f, 0.22f}, 0.02f, 40.0f);
+            composite(&r, &tg, &tg.scene, view, proj, (Vector3){60.0f, 14.0f, 70.0f}, dark ? (Vector3){0.36f, 0.86f, 0.26f} : (Vector3){0.30f, 0.78f, 0.22f}, 0.02f, 40.0f);
             EndTextureMode();
             bg = &tg.mid;
         }
         if (surface_pass(&r, &tg, &s, s.water, view, proj, cam))
-            composite(&r, &tg, bg, view, proj, (Vector3){7.0f, 2.6f, 1.2f}, (Vector3){0.04f, 0.26f, 0.45f}, 0.04f, 200.0f);
+            composite(&r, &tg, bg, view, proj, (Vector3){7.0f, 2.6f, 1.2f}, dark ? (Vector3){0.07f, 0.36f, 0.62f} : (Vector3){0.04f, 0.26f, 0.45f}, 0.04f, 200.0f);
         else DrawTextureRec(bg->rt.texture, (Rectangle){0, 0, (float)w, -(float)h}, (Vector2){0, 0}, WHITE);
         draw_specks(&r, &s, view, proj, cam);
 
         sl_stats st;
         sl_get_stats(s.world, &st);
-        DrawTextEx(font, "slime", (Vector2){18, 6}, 56, 1, (Color){30, 40, 60, 255});
+        DrawTextEx(font, "slime", (Vector2){18, 6}, 56, 1, dark ? RAYWHITE : (Color){30, 40, 60, 255});
         DrawTextEx(font, TextFormat("%s   |   %d particles, %d awake, %d spray   |   %.1f ms per step%s", SCENE_NAMES[s.scene], st.particles, st.awake,
                                     sl_diffuse(s.world, NULL, NULL, NULL, NULL), step_ms, paused ? "   |   paused" : ""),
-                   (Vector2){20, 62}, 26, 1, (Color){40, 50, 70, 255});
+                   (Vector2){20, 62}, 26, 1, dark ? (Color){200, 205, 215, 255} : (Color){40, 50, 70, 255});
         toolbar(font, &t, &s, mouse, IsMouseButtonPressed(MOUSE_BUTTON_LEFT));
-        DrawTextEx(font, "left use tool    right drag orbit    middle drag pan    wheel zoom    shift+wheel or [ ] brush    space pause    X clear    F1-F4 examples, F5 sandbox",
-                   (Vector2){20, (float)h - 34}, 22, 1, (Color){50, 58, 76, 255});
+        DrawTextEx(font, "left use tool    right drag orbit    middle drag pan    wheel zoom    shift+wheel or [ ] brush    space pause    X clear    T theme    F1-F4 examples, F5 sandbox",
+                   (Vector2){20, (float)h - 34}, 22, 1, dark ? (Color){150, 156, 170, 255} : (Color){50, 58, 76, 255});
         EndDrawing();
 
         if (sh.path && ++frame == sh.frames) { TakeScreenshot(sh.path); break; }
