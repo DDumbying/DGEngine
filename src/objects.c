@@ -52,7 +52,7 @@ static void color_dist(sl_world *w) {
     for (int c = 0; c <= SL_MAX_COLORS; c++) { w->dist_color_off[c] = fill[c] = sum; sum += counts[c]; }
     w->dist_color_off[SL_MAX_COLORS + 1] = sum;
     for (int k = 0; k < w->dist_count; k++) sorted[fill[colors[k]]++] = w->dist[k];
-    memcpy(w->dist, sorted, (size_t)w->dist_count * sizeof(dist_con));
+    if (w->dist_count) memcpy(w->dist, sorted, (size_t)w->dist_count * sizeof(dist_con));
     sl__free(w, colors);
     sl__free(w, sorted);
 }
