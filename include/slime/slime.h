@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 #define SLIME_VERSION_MAJOR 0
-#define SLIME_VERSION_MINOR 4
+#define SLIME_VERSION_MINOR 5
 #define SLIME_VERSION_PATCH 0
 
 #define SL_MAX_MATERIALS 16

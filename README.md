@@ -94,6 +94,9 @@ ctest --test-dir build --output-on-failure   # headless tests
 ./build/slime_bench                          # timing and memory
 ```
 
+To see where the time goes, build with `-DSLIME_PROFILE=ON` and run `slime_bench --phases`; it prints the
+cost of each solver phase on 1 and 4 threads.
+
 To use it in your own CMake project:
 
 ```cmake
@@ -175,18 +178,19 @@ third between runs, so compare numbers from the same run.
 
 | Scene | Particles | Threads | First 1 s, ms/step | After 26 s, ms/step |
 |---|---|---|---|---|
-| Dam break next to sand | 1,500 | 4 | 5.5 | 0.04 (asleep) |
-| Dam break next to sand | 8,400 | 1 | 86.2 | 56.9 |
-| Dam break next to sand | 8,400 | 4 | 36.8 | 21.2 |
-| Dam break next to sand | 14,000 | 4 | 59.9 | 28.9 |
-| Water pool | 5,500 | 4 | 21.8 | 0.04 (asleep) |
-| Water pool with ellipsoids and spray | 8,400 | 4 | 35.1 | 22.0 |
+| Dam break next to sand | 1,500 | 4 | 3.3 | 0.01 (asleep) |
+| Dam break next to sand | 8,400 | 1 | 62.3 | 30.5 |
+| Dam break next to sand | 8,400 | 4 | 19.8 | 12.2 |
+| Dam break next to sand | 14,000 | 4 | 30.2 | 20.5 |
+| Water pool | 5,500 | 4 | 11.8 | 0.03 (asleep) |
+| Water pool with ellipsoids and spray | 8,400 | 4 | 21.0 | 12.2 |
 
 Calm scenes sleep and cost almost nothing. In the larger sand scenes water is still seeping
 through the sand after 26 seconds, so they are still awake. Memory is about 750 to 950 bytes per
 particle, a little more with surface ellipsoids, including headroom for the busiest moment. The
-violent case is still slower than the goal of 10k particles under 8 ms on 4 cores; the remaining
-costs are the fluid pressure passes and the neighbor rebuilds that fast water needs.
+violent case is still slower than the goal of 10k particles under 8 ms on 4 cores; fast water
+moves past the neighbor margin every substep, so the neighbor rebuild and the fluid pressure
+passes are what is left to make cheaper.
 
 ## Notes
 

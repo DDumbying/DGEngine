@@ -10,7 +10,9 @@ static void predict(sl_world *w, int begin, int end, int chunk, void *ctx) {
     }
 }
 
-/* Position based fluids: lambda is how hard each fluid particle pushes to get back to rest density. */
+/* Position based fluids: lambda is how hard each fluid particle pushes to get back to rest density.
+   Neighbors inside the kernel are moved to the front of the list with their distance, and w->order[i]
+   marks where they end, so the delta pass only visits those. */
 static void fluid_lambda(sl_world *w, int begin, int end, int chunk, void *ctx) {
     (void)chunk; (void)ctx;
     float h = w->h, h2 = h * h, inv_rest = 1.0f / w->w_rest, eps = 0.2f / (w->spacing * w->spacing);
@@ -21,19 +23,22 @@ static void fluid_lambda(sl_world *w, int begin, int end, int chunk, void *ctx) 
         sl_vec3 grad_i, pi = w->p[i];
         float rho = kernel(0, h) + wall_density(w, i, &grad_i, 0), grad2 = 0;
         grad_i = v3_scale(grad_i, inv_rest);
-        for (int n = w->nbr_off[i]; n < w->nbr_off[i + 1]; n++) {
+        int in = w->nbr_off[i];
+        for (int n = in; n < w->nbr_off[i + 1]; n++) {
             int j = w->nbr[n];
             sl_vec3 d = v3_sub(pi, w->p[j]);
             float r2 = v3_len2(d);
-            if (r2 >= h2) { w->nbr_r[n] = h; continue; }
+            if (r2 >= h2) continue;
             float r = sqrtf(r2);
-            w->nbr_r[n] = r;
+            if (n != in) { w->nbr[n] = w->nbr[in]; w->nbr[in] = j; }
+            w->nbr_r[in++] = r;
             rho += kernel(r, h);
             if (r < 1e-9f) continue;
             sl_vec3 g = v3_scale(d, kernel_grad(r, h) * inv_rest / r);
             grad_i = v3_add(grad_i, g);
             if (w->flags[j] & F_FLUID) grad2 += v3_len2(g);
         }
+        w->order[i] = in;
         float c = rho * inv_rest - 1.0f;
         if (c > 0) w->lambda[i] = -c / (grad2 + v3_len2(grad_i) + eps);
     }
@@ -71,10 +76,10 @@ static void fluid_delta(sl_world *w, int begin, int end, int chunk, void *ctx) {
                 wall_density(w, i, &wall, li * inv_rest * w->mass[i] / w->hs);
                 dp = v3_scale(wall, li * inv_rest);
             }
-            for (int n = w->nbr_off[i]; n < w->nbr_off[i + 1]; n++) {
+            for (int n = w->nbr_off[i]; n < w->order[i]; n++) {
                 int j = w->nbr[n];
                 float r = w->nbr_r[n];
-                if (r >= h || r < 1e-9f || (!(w->flags[j] & F_FLUID) && li == 0)) continue;
+                if (r < 1e-9f || (!(w->flags[j] & F_FLUID) && li == 0)) continue;
                 sl_vec3 d = v3_sub(pi, w->p[j]);
                 float l = li + ((w->flags[j] & F_FLUID) ? w->lambda[j] : 0.0f);
                 dp = v3_madd(dp, d, l * kernel_grad(r, h) * inv_rest / r);
@@ -120,8 +125,10 @@ static void solve_contact_range(sl_world *w, int begin, int end, int chunk, void
         }
         float r = sqrtf(r2), pen = dist - r;
         sl_vec3 n = v3_scale(d, 1.0f / r);
-        w->flags[i] |= F_TOUCH | (w->flags[j] & F_FLUID ? F_WET : 0);
-        w->flags[j] |= F_TOUCH | (w->flags[i] & F_FLUID ? F_WET : 0);
+        /* Written only when they change: flags of nearby particles share cache lines across threads. */
+        unsigned char fi = F_TOUCH | (w->flags[j] & F_FLUID ? F_WET : 0), fj = F_TOUCH | (w->flags[i] & F_FLUID ? F_WET : 0);
+        if ((w->flags[i] & fi) != fi) w->flags[i] |= fi;
+        if ((w->flags[j] & fj) != fj) w->flags[j] |= fj;
         w->p[i] = v3_madd(w->p[i], n, pen * wi / ws);
         w->p[j] = v3_madd(w->p[j], n, -pen * wj / ws);
 
@@ -155,14 +162,14 @@ static void stabilize_range(sl_world *w, int begin, int end, int chunk, void *ct
     }
 }
 
-/* Runs fn over each color in turn; ctx is the color's first index. The overflow color shares
-   particles, so it runs on one thread. */
+/* Runs fn over each color in turn; ctx is the color's first index. Nothing in a color shares a particle,
+   so small chunks spread even short colors over every thread. The overflow color runs on one thread. */
 void run_colors(sl_world *w, const int *offsets, sl_range_fn fn) {
     for (int color = 0; color <= SL_MAX_COLORS; color++) {
         int base = offsets[color], count = offsets[color + 1] - base;
         if (count <= 0) continue;
-        if (color == SL_MAX_COLORS || count < SL_CHUNK) fn(w, 0, count, 0, &base);
-        else sl__parallel(w, count, fn, &base);
+        if (color == SL_MAX_COLORS || count < 2 * SL_COLOR_CHUNK) fn(w, 0, count, 0, &base);
+        else sl__parallel_sized(w, count, SL_COLOR_CHUNK, fn, &base);
     }
 }
 
@@ -253,26 +260,24 @@ void move_grabs(sl_world *w, float t) {
 
 void solve_substep(sl_world *w, float t) {
     int n = w->active_count;
-    collider_frames(w, t);
-    sl__parallel(w, n, predict, NULL);
-    move_grabs(w, t);
+    PROF(P_PREDICT, collider_frames(w, t); sl__parallel(w, n, predict, NULL); move_grabs(w, t));
 
     int fluids = 0;
     for (int m = 0; m < w->material_count; m++) fluids |= w->materials[m].kind == SL_FLUID;
     objects_substep(w);
     for (int it = 0; fluids && it < w->fluid_iterations; it++) {
-        sl__parallel(w, n, fluid_lambda, NULL);
-        sl__parallel(w, n, fluid_delta, NULL);
-        sl__parallel(w, n, apply_delta, NULL);
+        PROF(P_LAMBDA, sl__parallel(w, n, fluid_lambda, NULL));
+        PROF(P_DELTA, sl__parallel(w, n, fluid_delta, NULL));
+        PROF(P_APPLY, sl__parallel(w, n, apply_delta, NULL));
     }
     /* Without grain contacts or objects there is nothing to iterate, so colliders need a single pass. */
     int passes = w->contact_count || w->dist_count || w->cluster_count ? w->iterations : 1;
     for (int k = 0; k < passes; k++) {
-        run_colors(w, w->color_off, solve_contact_range);
-        objects_solve(w);
-        solve_colliders(w);
+        PROF(P_SOLIDS, run_colors(w, w->color_off, solve_contact_range));
+        PROF(P_OBJECTS, objects_solve(w));
+        PROF(P_COLLIDERS, solve_colliders(w));
     }
-    sl__parallel(w, n, update_velocities, NULL);
+    PROF(P_VELOCITY, sl__parallel(w, n, update_velocities, NULL));
 }
 
 void fluid_step(sl_world *w) {

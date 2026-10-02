@@ -52,7 +52,47 @@ static void row(const char *name, int workers, float size, int with_sand) {
     sl_world_destroy(w);
 }
 
+#ifdef SLIME_PROFILE
+/* Mirrors the phase list in src/internal.h. */
+extern double sl__prof[];
+extern long sl__dispatches;
+static const char *PHASES[] = {"sort", "reorder", "pairs", "neighbors", "contacts", "color", "islands", "skin check",
+                               "stabilize", "predict", "fluid lambda", "fluid delta", "fluid apply", "solid contacts",
+                               "objects", "colliders", "velocity", "fluid step", "extras", "whole step"};
+enum { PHASE_COUNT = sizeof PHASES / sizeof PHASES[0] };
+
+/* Where a violent step spends its time, for 1 and 4 threads side by side. */
+static void phases(void) {
+    double ms[2][PHASE_COUNT];
+    long calls[2];
+    double rebuilds[2];
+    int workers[2] = {1, 4}, frames = 90;
+    for (int k = 0; k < 2; k++) {
+        sl_world *w = scene(workers[k], 1.0f, 1);
+        for (int i = 0; i < 10; i++) sl_step(w, 1.0f / 60.0f);
+        memset(sl__prof, 0, sizeof(double) * PHASE_COUNT);
+        sl__dispatches = 0;
+        sl_stats st0, st1;
+        sl_get_stats(w, &st0);
+        time_steps(w, frames);
+        sl_get_stats(w, &st1);
+        rebuilds[k] = (double)(st1.rebuilds - st0.rebuilds) / frames;
+        for (int p = 0; p < PHASE_COUNT; p++) ms[k][p] = sl__prof[p] * 1000.0 / frames;
+        calls[k] = sl__dispatches / frames;
+        sl_world_destroy(w);
+    }
+    printf("%-16s %10s %10s %8s\n", "phase, ms/step", "1 thread", "4 threads", "scaling");
+    for (int p = 0; p < PHASE_COUNT; p++)
+        printf("%-16s %10.2f %10.2f %7.1fx\n", PHASES[p], ms[0][p], ms[1][p], ms[1][p] > 0 ? ms[0][p] / ms[1][p] : 0.0);
+    printf("%-16s %10ld %10ld\n", "dispatches/step", calls[0], calls[1]);
+    printf("%-16s %10.2f %10.2f\n", "rebuilds/step", rebuilds[0], rebuilds[1]);
+}
+#endif
+
 int main(int argc, char **argv) {
+#ifdef SLIME_PROFILE
+    if (argc > 1 && strcmp(argv[1], "--phases") == 0) { phases(); return 0; }
+#endif
     float sizes[] = {0.6f, 1.0f, 1.4f, 1.8f};
     int quick = argc > 1 && strcmp(argv[1], "--quick") == 0;
     printf("%-12s %9s %8s %12s %12s %9s %11s\n", "scene", "particles", "workers", "first 1s ms", "after 26s ms", "awake", "bytes/part");

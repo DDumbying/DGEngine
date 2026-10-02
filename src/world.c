@@ -523,14 +523,14 @@ static void check_skin(sl_world *w, int begin, int end, int chunk, void *ctx) {
 }
 
 static int needs_rebuild(sl_world *w) {
-    sl__parallel(w, w->active_count, check_skin, NULL);
+    PROF(P_SKIN, sl__parallel(w, w->active_count, check_skin, NULL));
     for (int c = 0; c < sl__chunks(w->active_count); c++) if (w->order[c]) return 1;
     return 0;
 }
 
-static void refresh(sl_world *w, int move) {
+static void refresh(sl_world *w, int step_start) {
     if (w->need_rebuild || needs_rebuild(w)) {
-        if (grid_rebuild(w, move)) { w->need_rebuild = 0; w->rebuilds++; }
+        if (grid_rebuild(w, step_start)) { w->need_rebuild = 0; w->rebuilds++; }
     }
 }
 
@@ -566,6 +566,9 @@ static void end_step(sl_world *w, int begin, int end, int chunk, void *ctx) {
 
 void sl_step(sl_world *w, float dt) {
     if (!w || !(dt > 0)) return;
+#ifdef SLIME_PROFILE
+    double start = sl__now();
+#endif
     w->dt = dt;
     w->hs = dt / (float)w->substeps;
     if (w->pool) pool_wake(w->pool);
@@ -577,21 +580,22 @@ void sl_step(sl_world *w, float dt) {
         else w->grabs[g--] = w->grabs[--w->grab_count];
     }
     if (w->mem_dirty && objects_membership(w)) w->mem_dirty = 0;
-    if (!w->need_rebuild) update_islands(w);
+    if (!w->need_rebuild) settle_islands(w);
     refresh(w, 1);
 
-    stabilize(w);
-    stabilize(w);
-    sl__parallel(w, w->active_count, begin_step, NULL);
-    for (int s = 0; s < w->substeps; s++) {
-        if (s > 0) refresh(w, 0);
-        solve_substep(w, (float)(s + 1) / (float)w->substeps);
+    /* A world that is fully asleep skips the solver; spray and collider loads still update below. */
+    if (w->active_count) {
+        PROF(P_STABILIZE, stabilize(w); stabilize(w));
+        sl__parallel(w, w->active_count, begin_step, NULL);
+        for (int s = 0; s < w->substeps; s++) {
+            if (s > 0) refresh(w, 0);
+            solve_substep(w, (float)(s + 1) / (float)w->substeps);
+        }
+        PROF(P_FLUID_STEP, fluid_step(w));
+        sl__parallel(w, w->active_count, end_step, NULL);
     }
-    fluid_step(w);
     for (int g = 0; g < w->grab_count; g++) w->grabs[g].from = w->grabs[g].to;
-    sl__parallel(w, w->active_count, end_step, NULL);
-    if (w->max_diffuse) diffuse_step(w);
-    if (w->use_aniso) anisotropy_step(w);
+    PROF(P_EXTRAS, if (w->max_diffuse) diffuse_step(w); if (w->use_aniso) anisotropy_step(w));
     w->step_count++;
     objects_plasticity(w);
 
@@ -607,6 +611,9 @@ void sl_step(sl_world *w, float dt) {
         w->colliders[c].prev_rot = w->colliders[c].rot;
     }
     if (w->pool) pool_sleep(w->pool);
+#ifdef SLIME_PROFILE
+    sl__prof[P_STEP] += sl__now() - start;
+#endif
 }
 
 int sl_count(const sl_world *w) { return w ? w->count : 0; }

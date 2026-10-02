@@ -5,6 +5,7 @@
 #include "vec3.h"
 
 #define SL_CHUNK 256
+#define SL_COLOR_CHUNK 64
 #define SL_WALL_SAMPLES 64
 #define SL_MAX_COLORS 64
 #define SL_CALM_STEPS 30
@@ -48,6 +49,7 @@ enum { OBJ_ROPE = 1, OBJ_CLOTH, OBJ_SOFT };
 typedef struct {
     int dense;            /* dense grid over the bounds, or a hash table when particles are spread out */
     int nx, ny, nz, cells, start_cap, table_size;
+    int span;             /* cells to scan on each side; their size covers the search range */
     float cell;
     sl_vec3 origin;
     int *start;           /* cells + 1 */
@@ -84,14 +86,15 @@ struct sl_world {
     grid g;
     int *nbr_off, *nbr, nbr_cap, nbr_r_cap;
     float *nbr_r;                       /* distance per neighbor entry, from the lambda pass */
-    int *pairs, pair_count;   /* each close pair once as i, j; only valid during a rebuild */
-    int chunk_pairs;          /* room per chunk when pairs are found in one pass */
+    int pair_count;           /* close pairs, each counted once */
+    int chunk_room;           /* list entries each chunk may write in one pass */
     contact *contacts, *contact_tmp;
     int contact_count, contact_cap, contact_tmp_cap, color_off[SL_MAX_COLORS + 2];
     int *active, active_count;
     int *island_calm, island_count, island_cap;
     int need_rebuild, rebuilds, built;   /* built: particle count when neighbor lists were made */
     int nbr_valid;                       /* neighbor lists still match the current slots */
+    int islands_stale;                   /* island labels predate the current neighbor lists */
     unsigned char *colors;               /* graph coloring scratch */
     int color_cap, *chunk_buf, chunk_cap;
 
@@ -120,6 +123,18 @@ struct sl_world {
     sl_pool *pool;
 };
 
+/* Phase timers, only in builds made with SLIME_PROFILE; one world at a time. */
+enum { P_SORT, P_REORDER, P_PAIRS, P_NEIGHBORS, P_CONTACTS, P_COLOR, P_ISLANDS, P_SKIN, P_STABILIZE, P_PREDICT,
+       P_LAMBDA, P_DELTA, P_APPLY, P_SOLIDS, P_OBJECTS, P_COLLIDERS, P_VELOCITY, P_FLUID_STEP, P_EXTRAS, P_STEP, P_COUNT };
+#ifdef SLIME_PROFILE
+extern double sl__prof[P_COUNT];
+extern long sl__dispatches;
+double sl__now(void);
+#define PROF(ph, stmt) do { double t0_ = sl__now(); stmt; sl__prof[ph] += sl__now() - t0_; } while (0)
+#else
+#define PROF(ph, stmt) do { stmt; } while (0)
+#endif
+
 /* memory */
 void *sl__alloc(sl_world *w, size_t size);
 void sl__free(sl_world *w, void *ptr);
@@ -128,6 +143,8 @@ int sl__grow(sl_world *w, void **ptr, int *cap, int need, size_t elem);
 /* threads: fn runs over [begin, end) of count items, chunk is a fixed index for reductions */
 typedef void (*sl_range_fn)(sl_world *w, int begin, int end, int chunk, void *ctx);
 void sl__parallel(sl_world *w, int count, sl_range_fn fn, void *ctx);
+/* Any chunk size, for passes whose result does not depend on how the work is split. */
+void sl__parallel_sized(sl_world *w, int count, int size, sl_range_fn fn, void *ctx);
 int sl__chunks(int count);
 sl_pool *pool_create(sl_world *w, int threads);
 void pool_destroy(sl_world *w, sl_pool *p);
@@ -145,8 +162,8 @@ int color_graph(sl_world *w, const int *ends, int stride, int count, int *offset
 void run_colors(sl_world *w, const int *offsets, sl_range_fn fn);
 
 /* grid and neighbors */
-int grid_rebuild(sl_world *w, int move);   /* move: also reorder particles in memory */
-void update_islands(sl_world *w);
+int grid_rebuild(sl_world *w, int step_start);   /* step_start: also reorder memory and decide who sleeps */
+void settle_islands(sl_world *w);
 
 /* solver passes */
 void collider_frames(sl_world *w, float t);
