@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
-project(slime VERSION 0.4.0 LANGUAGES C)
+project(slime VERSION 0.5.0 LANGUAGES C)
 
 option(SLIME_BUILD_TESTS "Build tests and benchmark" ON)
 option(SLIME_BUILD_DEMO "Build the raylib demo" OFF)
+option(SLIME_PROFILE "Time each solver phase, for slime_bench --phases" OFF)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release)
@@ -12,6 +13,9 @@ add_library(slime src/world.c src/grid.c src/solve.c src/collide.c src/objects.c
 find_package(Threads REQUIRED)
 target_link_libraries(slime PRIVATE Threads::Threads)
 target_include_directories(slime PUBLIC include)
+if(SLIME_PROFILE)
+    target_compile_definitions(slime PUBLIC SLIME_PROFILE)
+endif()
 set_target_properties(slime PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 if(MSVC)
     target_compile_options(slime PRIVATE /W4)

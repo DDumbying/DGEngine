@@ -140,7 +140,7 @@ float wall_density(sl_world *w, int i, sl_vec3 *grad, float scale) {
 
 static void push_out(sl_world *w, int i, sl_vec3 n, float pen, sl_vec3 surf_move, float mu, int c) {
     sl_vec3 before = w->p[i];
-    w->flags[i] |= F_TOUCH;
+    if (!(w->flags[i] & F_TOUCH)) w->flags[i] |= F_TOUCH;
     w->p[i] = v3_madd(w->p[i], n, pen);
     sl_vec3 rel = v3_sub(v3_sub(w->p[i], w->x[i]), surf_move);
     sl_vec3 tan = v3_sub(rel, v3_scale(n, v3_dot(rel, n)));
