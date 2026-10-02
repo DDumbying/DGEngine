@@ -34,40 +34,39 @@ static void eigen3(float a[3][3], float val[3], float vec[3][3]) {
 static void aniso_range(sl_world *w, int begin, int end, int chunk, void *ctx) {
     (void)chunk; (void)ctx;
     float r = w->radius, h = w->h, h2 = h * h;
-    for (int s = begin; s < end; s++) {
+    for (int k = begin; k < end; k++) {
+        int s = w->active[k];
         sl_vec3 *out = &w->aniso[4 * s], xi = w->x[s];
         out[0] = xi;
         out[1] = v3(r, 0, 0);
         out[2] = v3(0, r, 0);
         out[3] = v3(0, 0, r);
         if (!(w->flags[s] & F_FLUID) || s >= w->built) continue;
-        float wsum = 0;
-        sl_vec3 mean = v3(0, 0, 0);
+        /* One pass, relative to xi: weighted sums of offsets and their products give mean and covariance. */
+        float wsum = 0, m2[6] = {0};
+        sl_vec3 m1 = v3(0, 0, 0);
         int count = 0;
         for (int n = w->nbr_off[s]; n < w->nbr_off[s + 1]; n++) {
             int j = w->nbr[n];
             if (j >= w->count || !(w->flags[j] & F_FLUID)) continue;
-            float d2 = v3_len2(v3_sub(w->x[j], xi));
+            sl_vec3 e = v3_sub(w->x[j], xi);
+            float d2 = v3_len2(e);
             if (d2 >= h2) continue;
             float q = sqrtf(d2) / h, wt = 1.0f - q * q * q;
-            mean = v3_madd(mean, w->x[j], wt);
+            m1 = v3_madd(m1, e, wt);
+            m2[0] += wt * e.x * e.x; m2[1] += wt * e.x * e.y; m2[2] += wt * e.x * e.z;
+            m2[3] += wt * e.y * e.y; m2[4] += wt * e.y * e.z; m2[5] += wt * e.z * e.z;
             wsum += wt;
             count++;
         }
         if (count < 4) continue;
-        mean = v3_scale(v3_add(mean, xi), 1.0f / (wsum + 1.0f));
-        float c[3][3] = {{0}};
-        for (int n = w->nbr_off[s]; n < w->nbr_off[s + 1]; n++) {
-            int j = w->nbr[n];
-            if (j >= w->count || !(w->flags[j] & F_FLUID)) continue;
-            sl_vec3 d = v3_sub(w->x[j], xi);
-            float d2 = v3_len2(d);
-            if (d2 >= h2) continue;
-            float q = sqrtf(d2) / h, wt = 1.0f - q * q * q;
-            sl_vec3 e = v3_sub(w->x[j], mean);
-            float ev[3] = {e.x, e.y, e.z};
-            for (int a = 0; a < 3; a++) for (int b = 0; b < 3; b++) c[a][b] += wt * ev[a] * ev[b];
-        }
+        sl_vec3 m = v3_scale(m1, 1.0f / (wsum + 1.0f)), mean = v3_add(xi, m);
+        /* sum wt (e - m)(e - m)^T = M2 - M1 m^T - m M1^T + wsum m m^T */
+        float mv[3] = {m.x, m.y, m.z}, sv[3] = {m1.x, m1.y, m1.z};
+        int idx[3][3] = {{0, 1, 2}, {1, 3, 4}, {2, 4, 5}};
+        float c[3][3];
+        for (int a = 0; a < 3; a++)
+            for (int b = 0; b < 3; b++) c[a][b] = m2[idx[a][b]] - sv[a] * mv[b] - mv[a] * sv[b] + wsum * mv[a] * mv[b];
         float val[3], vec[3][3];
         eigen3(c, val, vec);
         float top = fmaxf(val[0], fmaxf(val[1], val[2]));
@@ -80,7 +79,8 @@ static void aniso_range(sl_world *w, int begin, int end, int chunk, void *ctx) {
     }
 }
 
-void anisotropy_step(sl_world *w) { sl__parallel(w, w->count, aniso_range, NULL); }
+/* Sleeping particles keep the shape they had; it moves with them when memory is reordered. */
+void anisotropy_step(sl_world *w) { sl__parallel(w, w->active_count, aniso_range, NULL); }
 
 static unsigned hash3(unsigned a, unsigned b, unsigned c) {
     unsigned h = a * 0x9e3779b1u ^ b * 0x85ebca77u ^ c * 0xc2b2ae3du;

@@ -28,33 +28,19 @@ static int add_dist(sl_world *w, int obj, int a, int b, float compliance) {
     return 1;
 }
 
-/* Same greedy coloring as contacts, so each color of distance constraints runs in parallel. */
-static void color_dist(sl_world *w) {
-    unsigned long long *used = (unsigned long long *)(void *)w->tmp;
-    int counts[SL_MAX_COLORS + 1] = {0}, fill[SL_MAX_COLORS + 1];
-    unsigned char *colors = sl__alloc(w, (size_t)w->dist_count + 1);
-    dist_con *sorted = sl__alloc(w, (size_t)w->dist_count * sizeof(dist_con) + 1);
-    if (!colors || !sorted) { sl__free(w, colors); sl__free(w, sorted); return; }
-    for (int s = 0; s < w->count; s++) used[s] = 0;
-    for (int k = 0; k < w->dist_count; k++) {
-        int a = w->dist[k].a, b = w->dist[k].b, color = SL_MAX_COLORS;
-        unsigned long long free_bits = ~(used[a] | used[b]);
-        if (free_bits) {
-            color = 0;
-            while (!(free_bits >> color & 1ull)) color++;
-            used[a] |= 1ull << color;
-            used[b] |= 1ull << color;
-        }
-        colors[k] = (unsigned char)color;
-        counts[color]++;
+/* Same coloring as contacts, so each color of distance constraints runs in parallel. */
+void color_dist(sl_world *w) {
+    int fill[SL_MAX_COLORS + 2];
+    if (!sl__grow(w, (void **)&w->dist_tmp, &w->dist_tmp_cap, w->dist_count + 1, sizeof(dist_con))
+        || !color_graph(w, (const int *)(void *)w->dist, (int)(sizeof(dist_con) / sizeof(int)), w->dist_count, w->dist_color_off)) {
+        /* Without room to color, everything goes in the overflow color and runs on one thread. */
+        memset(w->dist_color_off, 0, sizeof w->dist_color_off);
+        w->dist_color_off[SL_MAX_COLORS + 1] = w->dist_count;
+        return;
     }
-    int sum = 0;
-    for (int c = 0; c <= SL_MAX_COLORS; c++) { w->dist_color_off[c] = fill[c] = sum; sum += counts[c]; }
-    w->dist_color_off[SL_MAX_COLORS + 1] = sum;
-    for (int k = 0; k < w->dist_count; k++) sorted[fill[colors[k]]++] = w->dist[k];
-    if (w->dist_count) memcpy(w->dist, sorted, (size_t)w->dist_count * sizeof(dist_con));
-    sl__free(w, colors);
-    sl__free(w, sorted);
+    memcpy(fill, w->dist_color_off, sizeof fill);
+    for (int k = 0; k < w->dist_count; k++) w->dist_tmp[fill[w->colors[k]]++] = w->dist[k];
+    if (w->dist_count) memcpy(w->dist, w->dist_tmp, (size_t)w->dist_count * sizeof(dist_con));
 }
 
 static int alloc_ids(sl_world *w, int obj, int n) {
@@ -171,6 +157,8 @@ sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec
                 c->obj = obj;
                 c->stiffness = stiffness < 0 ? 0 : (stiffness > 1 ? 1 : stiffness);
                 c->plasticity = plasticity < 0 ? 0 : (plasticity > 1 ? 1 : plasticity);
+                /* Applied every pass, so spread over all passes in a step to match the asked stiffness. */
+                c->pull = c->stiffness >= 1 ? 1.0f : 1.0f - powf(1.0f - c->stiffness, 1.0f / (float)(w->substeps * w->iterations));
                 c->rot = q_identity();
                 sl_vec3 center = v3(0, 0, 0);
                 for (int k = lo[2][cz]; k <= hi[2][cz]; k++)
@@ -187,7 +175,13 @@ sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec
 }
 
 void sl_object_destroy(sl_world *w, sl_object o) {
-    if (!w || o < 0 || o >= w->object_count || !w->objects[o].alive) return;
+    if (!w || o < 0 || o >= w->object_count || w->objects[o].alive != 1) return;
+    w->objects[o].alive = 2;
+    remove_doomed(w, NULL, 0);
+}
+
+/* Drops the object's constraints and record; its particles are removed by the caller. */
+void objects_drop(sl_world *w, int o) {
     int n = 0;
     for (int k = 0; k < w->dist_count; k++) if (w->dist[k].obj != o) w->dist[n++] = w->dist[k];
     w->dist_count = n;
@@ -203,10 +197,8 @@ void sl_object_destroy(sl_world *w, sl_object o) {
     }
     w->cluster_count = nc;
     w->member_count = nm;
-    sl__remove_object_particles(w, o);
     sl__free(w, w->objects[o].ids);
     memset(&w->objects[o], 0, sizeof(object));
-    color_dist(w);
     w->mem_dirty = 1;
 }
 
@@ -310,32 +302,25 @@ static void match_clusters(sl_world *w, int begin, int end, int chunk, void *ctx
 
 static void match_particles(sl_world *w, int begin, int end, int chunk, void *ctx) {
     (void)chunk; (void)ctx;
-    float passes = (float)(w->substeps * w->iterations);
     for (int k = begin; k < end; k++) {
         int s = w->active[k];
         int first = w->mem_off[s], last = w->mem_off[s + 1];
         if (first == last || (w->flags[s] & F_KINEMATIC)) continue;
         sl_vec3 goal = v3(0, 0, 0);
-        float stiff = 0;
+        float pull = 0;
         for (int q = first; q < last; q++) {
             const member *mb = &w->members[w->mem_list[q]];
             const cluster *cl = &w->clusters[mb->cluster];
             goal = v3_add(goal, v3_add(cl->center, q_rotate(cl->rot, mb->rest)));
-            stiff = cl->stiffness;
+            pull += cl->pull;
         }
-        goal = v3_scale(goal, 1.0f / (float)(last - first));
-        float s_eff = stiff >= 1 ? 1.0f : 1.0f - powf(1.0f - stiff, 1.0f / passes);
-        w->p[s] = v3_madd(w->p[s], v3_sub(goal, w->p[s]), s_eff);
+        float inv = 1.0f / (float)(last - first);
+        w->p[s] = v3_madd(w->p[s], v3_sub(v3_scale(goal, inv), w->p[s]), pull * inv);
     }
 }
 
 void objects_solve(sl_world *w) {
-    for (int color = 0; color <= SL_MAX_COLORS; color++) {
-        int base = w->dist_color_off[color], count = w->dist_color_off[color + 1] - base;
-        if (count <= 0) continue;
-        if (color == SL_MAX_COLORS || count < SL_CHUNK) solve_dist_range(w, 0, count, 0, &base);
-        else sl__parallel(w, count, solve_dist_range, &base);
-    }
+    run_colors(w, w->dist_color_off, solve_dist_range);
     if (w->cluster_count) {
         sl__parallel(w, w->cluster_count, match_clusters, NULL);
         sl__parallel(w, w->active_count, match_particles, NULL);

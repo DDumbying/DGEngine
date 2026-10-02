@@ -113,6 +113,10 @@ float wall_density(sl_world *w, int i, sl_vec3 *grad, float scale) {
         const collider *col = &w->colliders[c];
         const sl_collider_desc *d = &col->desc;
         if (!col->enabled) continue;
+        if (!d->inside && d->shape != SL_PLANE) {
+            float far = bound_radius(d) + reach;
+            if (v3_len2(v3_sub(w->p[i], col->pos_t)) > far * far) continue;
+        }
         sl_vec3 n;
         sl_vec3 local = q_rotate(q_conj(col->rot_t), v3_sub(w->p[i], col->pos_t));
         if (d->shape == SL_BOX && d->inside) {
@@ -148,19 +152,24 @@ static void push_out(sl_world *w, int i, sl_vec3 n, float pen, sl_vec3 surf_move
     book_push(w, i, c, v3_scale(v3_sub(w->p[i], before), -w->mass[i] / w->hs));
 }
 
-/* Steps along the move of a fast particle so it cannot pass through a thin collider. */
-static void sweep(sl_world *w, int i, const collider *col) {
-    sl_vec3 from = w->x[i], dir = v3_sub(w->p[i], from), n;
-    float len = v3_len(dir), r = w->radius, t = 0;
-    if (len <= r) return;
-    dir = v3_scale(dir, 1.0f / len);
+/* Steps along the move of a fast particle so it cannot pass through a thin collider. A particle
+   already touching at the start is left to the contact, so it can still slide along the surface. */
+static void sweep(sl_world *w, int i, const collider *col, float len) {
+    sl_vec3 from = w->x[i], dir = v3_scale(v3_sub(w->p[i], from), 1.0f / len), n;
+    float r = w->radius, t = 0;
     quat inv = q_conj(col->rot_t);
+    if (sdf_local(&col->desc, q_rotate(inv, v3_sub(from, col->pos_t)), &n) < r) return;
     while (t < len) {
         sl_vec3 q = v3_madd(from, dir, t);
         float dist = sdf_local(&col->desc, q_rotate(inv, v3_sub(q, col->pos_t)), &n);
         if (dist < r) { w->p[i] = q; return; }
         t += fmaxf(dist - r, 0.5f * r);
     }
+}
+
+/* How far the collider surface under a local point moved during this substep. */
+static sl_vec3 surface_move(const collider *col, sl_vec3 local) {
+    return v3_sub(v3_add(col->pos_t, q_rotate(col->rot_t, local)), v3_add(col->pos_t0, q_rotate(col->rot_t0, local)));
 }
 
 static void collide_range(sl_world *w, int begin, int end, int chunk, void *ctx) {
@@ -173,15 +182,18 @@ static void collide_range(sl_world *w, int begin, int end, int chunk, void *ctx)
         int container = d->shape == SL_BOX && d->inside;
         int can_tunnel = !d->inside && d->shape != SL_PLANE;
         quat inv = q_conj(col->rot_t);
-        float mu = d->friction;
+        float mu = d->friction, far = bound_radius(d) + r;
 
         for (int k = begin; k < end; k++) {
             int i = w->active[k];
             if (w->flags[i] & F_KINEMATIC) continue;
-            if (can_tunnel) sweep(w, i, col);
+            if (can_tunnel) {
+                float len = v3_len(v3_sub(w->p[i], w->x[i]));
+                /* Far from the shape and too slow to reach it: nothing to do. */
+                if (len <= r && v3_len2(v3_sub(w->p[i], col->pos_t)) > far * far) continue;
+                if (len > r) sweep(w, i, col, len);
+            }
             sl_vec3 local = q_rotate(inv, v3_sub(w->p[i], col->pos_t));
-            sl_vec3 move = v3_sub(v3_add(col->pos_t, q_rotate(col->rot_t, local)),
-                                  v3_add(col->pos_t0, q_rotate(col->rot_t0, local)));
 
             /* Inside a box each wall is its own contact, so edges and corners hold too. */
             if (container) {
@@ -191,7 +203,7 @@ static void collide_range(sl_world *w, int begin, int end, int chunk, void *ctx)
                     if (pen <= 0) continue;
                     sl_vec3 n = v3(0, 0, 0);
                     (&n.x)[a] = lp[a] > 0 ? -1.0f : 1.0f;
-                    push_out(w, i, q_rotate(col->rot_t, n), pen, move, mu, c);
+                    push_out(w, i, q_rotate(col->rot_t, n), pen, surface_move(col, local), mu, c);
                 }
                 continue;
             }
@@ -199,7 +211,7 @@ static void collide_range(sl_world *w, int begin, int end, int chunk, void *ctx)
             sl_vec3 n;
             float dist = sdf_local(d, local, &n);
             if (d->inside) { dist = -dist; n = v3_scale(n, -1.0f); }
-            if (r - dist > 0) push_out(w, i, q_rotate(col->rot_t, n), r - dist, move, mu, c);
+            if (r - dist > 0) push_out(w, i, q_rotate(col->rot_t, n), r - dist, surface_move(col, local), mu, c);
         }
     }
 }

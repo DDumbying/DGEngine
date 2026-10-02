@@ -20,8 +20,6 @@ int sl__grow(sl_world *w, void **ptr, int *cap, int need, size_t elem) {
     return 1;
 }
 
-float kernel(float r, float h) { return r < h ? (h - r) * (h - r) * (h - r) : 0.0f; }
-
 /* Density of a perfect lattice at rest spacing, so fluid density can be measured relative to it. */
 static float rest_kernel_sum(float d, float h) {
     float sum = 0;
@@ -43,13 +41,12 @@ static int slot_arrays(sl_world *w, slot_array *out) {
     for (size_t i = 0; i < sizeof vecs / sizeof vecs[0]; i++) out[n++] = (slot_array){vecs[i], sizeof(sl_vec3), 0};
     void **floats[] = {(void **)&w->lambda, (void **)&w->inv_mass, (void **)&w->mass};
     for (size_t i = 0; i < sizeof floats / sizeof floats[0]; i++) out[n++] = (slot_array){floats[i], sizeof(float), 0};
-    void **bytes[] = {(void **)&w->flags, (void **)&w->calm, (void **)&w->mat, (void **)&w->wet};
+    void **bytes[] = {(void **)&w->flags, (void **)&w->calm, (void **)&w->mat, (void **)&w->wet, (void **)&w->near_fluid, (void **)&w->mark};
     for (size_t i = 0; i < sizeof bytes / sizeof bytes[0]; i++) out[n++] = (slot_array){bytes[i], 1, 0};
     out[n++] = (slot_array){(void **)&w->push, 2 * sizeof(sl_vec3), 0};
     out[n++] = (slot_array){(void **)&w->push_id, 2, 0};
-    out[n++] = (slot_array){(void **)&w->near_fluid, 1, 0};
     if (w->use_aniso) out[n++] = (slot_array){(void **)&w->aniso, 4 * sizeof(sl_vec3), 0};
-    void **ints[] = {(void **)&w->id, (void **)&w->obj, (void **)&w->island,
+    void **ints[] = {(void **)&w->id, (void **)&w->obj, (void **)&w->island, (void **)&w->material,
                      (void **)&w->g.bucket, (void **)&w->g.sorted, (void **)&w->active, (void **)&w->id_slot, (void **)&w->free_ids};
     for (size_t i = 0; i < sizeof ints / sizeof ints[0]; i++) out[n++] = (slot_array){ints[i], sizeof(int), 0};
     out[n++] = (slot_array){(void **)&w->order, sizeof(int), 1};
@@ -140,6 +137,9 @@ void sl_world_destroy(sl_world *w) {
     for (int i = 0; i < w->object_count; i++) sl__free(w, w->objects[i].ids);
     sl__free(w, w->objects);
     sl__free(w, w->dist);
+    sl__free(w, w->dist_tmp);
+    sl__free(w, w->colors);
+    sl__free(w, w->chunk_buf);
     sl__free(w, w->dist_lambda);
     sl__free(w, w->clusters);
     sl__free(w, w->members);
@@ -160,7 +160,7 @@ sl_material sl_material_add(sl_world *w, const sl_material_desc *desc) {
     return w->material_count++;
 }
 
-static int slot_of(const sl_world *w, sl_particle p) {
+int slot_of(const sl_world *w, sl_particle p) {
     if (!w || p < 0 || p >= w->next_id) return -1;
     int s = w->id_slot[p];
     return s >= 0 && s < w->count && w->id[s] == p ? s : -1;
@@ -175,6 +175,7 @@ sl_particle sl_spawn(sl_world *w, sl_material m, sl_vec3 pos, sl_vec3 vel) {
     w->x[s] = w->p[s] = w->x_step[s] = w->x_build[s] = pos;
     w->v[s] = vel;
     w->mat[s] = (unsigned char)m;
+    w->material[s] = m;
     w->mass[s] = w->materials[m].density * d * d * d;
     w->inv_mass[s] = 1.0f / w->mass[s];
     w->flags[s] = w->materials[m].kind == SL_FLUID ? F_FLUID : 0;
@@ -226,53 +227,95 @@ static void wake_near(sl_world *w, sl_vec3 c, float reach) {
         if (v3_len2(v3_sub(w->x[s], c)) < reach * reach) w->calm[s] = 0;
 }
 
-/* Moves the last slot into s; used by removal and object destruction. */
-static void remove_slot(sl_world *w, int s) {
-    int last = --w->count;
-    w->free_ids[w->free_count++] = w->id[s];
-    if (s != last) {
-        w->x[s] = w->x[last]; w->p[s] = w->p[last]; w->v[s] = w->v[last];
-        w->x_step[s] = w->x_step[last]; w->x_build[s] = w->x_build[last];
-        w->inv_mass[s] = w->inv_mass[last]; w->mass[s] = w->mass[last];
-        w->flags[s] = w->flags[last]; w->calm[s] = w->calm[last]; w->mat[s] = w->mat[last]; w->wet[s] = w->wet[last];
-        if (w->use_aniso) for (int k = 0; k < 4; k++) w->aniso[4 * s + k] = w->aniso[4 * last + k];
-        w->id[s] = w->id[last]; w->obj[s] = w->obj[last];
-        w->push[2 * s] = w->push[2 * last]; w->push[2 * s + 1] = w->push[2 * last + 1];
-        w->push_id[2 * s] = w->push_id[2 * last]; w->push_id[2 * s + 1] = w->push_id[2 * last + 1];
-        w->id_slot[w->id[s]] = s;
-        for (int c = 0; c < w->dist_count; c++) {
-            if (w->dist[c].a == last) w->dist[c].a = s;
-            if (w->dist[c].b == last) w->dist[c].b = s;
-        }
-        for (int m = 0; m < w->member_count; m++)
-            if (w->members[m].slot == last) w->members[m].slot = s;
+/* Wakes whatever touched a marked slot: its neighbors when the lists are current, else a box around them. */
+static void wake_marked(sl_world *w) {
+    if (w->nbr_valid) {
+        for (int s = 0; s < w->count && s < w->built; s++)
+            if (w->mark[s]) for (int n = w->nbr_off[s]; n < w->nbr_off[s + 1]; n++) w->calm[w->nbr[n]] = 0;
+        return;
     }
-    w->mem_dirty = 1;
+    float big = 1e30f, reach = 2 * w->h;
+    sl_vec3 lo = v3(big, big, big), hi = v3(-big, -big, -big);
+    for (int s = 0; s < w->count; s++) {
+        if (!w->mark[s]) continue;
+        sl_vec3 x = w->x[s];
+        lo = v3(fminf(lo.x, x.x), fminf(lo.y, x.y), fminf(lo.z, x.z));
+        hi = v3(fmaxf(hi.x, x.x), fmaxf(hi.y, x.y), fmaxf(hi.z, x.z));
+    }
+    for (int s = 0; s < w->count; s++) {
+        sl_vec3 x = w->x[s];
+        if (x.x > lo.x - reach && x.y > lo.y - reach && x.z > lo.z - reach && x.x < hi.x + reach && x.y < hi.y + reach && x.z < hi.z + reach)
+            w->calm[s] = 0;
+    }
+}
+
+static void move_slot(sl_world *w, int dst, int src) {
+    w->x[dst] = w->x[src]; w->p[dst] = w->p[src]; w->v[dst] = w->v[src];
+    w->x_step[dst] = w->x_step[src]; w->x_build[dst] = w->x_build[src];
+    w->inv_mass[dst] = w->inv_mass[src]; w->mass[dst] = w->mass[src];
+    w->flags[dst] = w->flags[src]; w->calm[dst] = w->calm[src]; w->mat[dst] = w->mat[src]; w->wet[dst] = w->wet[src];
+    w->material[dst] = w->material[src];
+    if (w->use_aniso) for (int k = 0; k < 4; k++) w->aniso[4 * dst + k] = w->aniso[4 * src + k];
+    w->id[dst] = w->id[src]; w->obj[dst] = w->obj[src];
+    for (int k = 0; k < 2; k++) { w->push[2 * dst + k] = w->push[2 * src + k]; w->push_id[2 * dst + k] = w->push_id[2 * src + k]; }
+}
+
+/* Removes every slot with mark set in one pass, keeping the order of the rest; returns how many went. */
+static int remove_marked(sl_world *w) {
+    wake_marked(w);
+    int *old_to_new = w->order, n = 0;
+    for (int s = 0; s < w->count; s++) {
+        if (w->mark[s]) { w->free_ids[w->free_count++] = w->id[s]; old_to_new[s] = -1; continue; }
+        if (n != s) move_slot(w, n, s);
+        w->id_slot[w->id[n]] = n;
+        old_to_new[s] = n++;
+    }
+    int removed = w->count - n;
+    if (!removed) return 0;
+    w->count = n;
+    for (int g = 0; g < w->grab_count; g++)
+        if (slot_of(w, w->grabs[g].id) < 0) w->grabs[g--] = w->grabs[--w->grab_count];
+    objects_remap(w, old_to_new);
     w->need_rebuild = 1;
+    w->nbr_valid = 0;
+    return removed;
+}
+
+/* Marks loose particles in the sphere (if any) and every particle of objects flagged for removal. */
+int remove_doomed(sl_world *w, const sl_vec3 *center, float radius) {
+    int doomed = 0;
+    for (int s = 0; s < w->count; s++) {
+        int o = w->obj[s], in = center && v3_len2(v3_sub(w->x[s], *center)) <= radius * radius;
+        if (in && o >= 0 && w->objects[o].alive == 1) w->objects[o].alive = 2;
+        w->mark[s] = (unsigned char)(in && o < 0);
+    }
+    for (int o = 0; o < w->object_count; o++) doomed |= w->objects[o].alive == 2;
+    for (int s = 0; doomed && s < w->count; s++) if (w->obj[s] >= 0 && w->objects[w->obj[s]].alive == 2) w->mark[s] = 1;
+    for (int o = 0; doomed && o < w->object_count; o++) if (w->objects[o].alive == 2) objects_drop(w, o);
+    if (doomed) color_dist(w);
+    return remove_marked(w);
 }
 
 int sl_remove(sl_world *w, sl_particle p) {
     int s = slot_of(w, p);
     if (s < 0 || w->obj[s] >= 0) return 0;
-    wake_near(w, w->x[s], w->h * 2);
-    remove_slot(w, s);
-    return 1;
+    memset(w->mark, 0, (size_t)w->count);
+    w->mark[s] = 1;
+    return remove_marked(w);
 }
 
 void sl_clear(sl_world *w) {
     if (!w) return;
     for (int i = 0; i < w->object_count; i++) sl__free(w, w->objects[i].ids);
     w->object_count = w->dist_count = w->cluster_count = w->member_count = 0;
+    memset(w->dist_color_off, 0, sizeof w->dist_color_off);
+    memset(w->color_off, 0, sizeof w->color_off);
     w->count = w->free_count = w->next_id = 0;
+    w->active_count = w->contact_count = w->pair_count = w->island_count = 0;
     w->grab_count = 0;
     w->diffuse_count = 0;
-    w->need_rebuild = 1;
-}
-
-/* Called by object code to drop all particles of an object at once. */
-void sl__remove_object_particles(sl_world *w, int obj) {
-    for (int s = w->count - 1; s >= 0; s--)
-        if (w->obj[s] == obj) { wake_near(w, w->x[s], w->h * 2); remove_slot(w, s); }
+    w->need_rebuild = w->mem_dirty = 1;
+    w->nbr_valid = 0;
 }
 
 int sl_alive(const sl_world *w, sl_particle p) { return slot_of(w, p) >= 0; }
@@ -314,7 +357,7 @@ void sl_pin(sl_world *w, sl_particle p, int pinned) {
     w->calm[s] = 0;
 }
 
-static float bound_radius(const sl_collider_desc *d) {
+float bound_radius(const sl_collider_desc *d) {
     switch (d->shape) {
     case SL_SPHERE: return d->radius;
     case SL_CAPSULE: return d->radius + d->half_extents.y;
@@ -429,37 +472,19 @@ void sl_grab_end(sl_world *w, sl_particle p) {
 
 /* Removes loose particles inside the sphere and whole objects that reach into it. */
 int sl_remove_sphere(sl_world *w, sl_vec3 center, float radius) {
-    if (!w || !(radius > 0)) return 0;
-    int removed = 0, before;
-    for (int s = w->count - 1; s >= 0; s--) {
-        if (v3_len2(v3_sub(w->x[s], center)) > radius * radius) continue;
-        int o = w->obj[s];
-        if (o >= 0) {
-            before = w->count;
-            sl_object_destroy(w, o);
-            removed += before - w->count;
-            if (s > w->count) s = w->count;
-            continue;
-        }
-        sl_particle id = w->id[s];
-        int g = find_grab(w, id);
-        if (g >= 0) w->grabs[g] = w->grabs[--w->grab_count];
-        wake_near(w, w->x[s], w->h * 2);
-        remove_slot(w, s);
-        removed++;
-    }
-    return removed;
+    if (!w || !(radius > 0) || !v3_finite(center)) return 0;
+    return remove_doomed(w, &center, radius);
 }
 
 void sl_collider_move(sl_world *w, sl_collider id, sl_vec3 position, const float rotation[4]) {
-    if (!w || id < 0 || id >= w->collider_count || !v3_finite(position)) return;
+    if (!valid_collider(w, id) || !v3_finite(position)) return;
     collider *c = &w->colliders[id];
     c->desc.position = position;
     if (rotation) c->rot = q_from(rotation);
 }
 
 sl_vec3 sl_collider_force(const sl_world *w, sl_collider c) {
-    if (!w || c < 0 || c >= w->collider_count) return v3(0, 0, 0);
+    if (!valid_collider(w, c)) return v3(0, 0, 0);
     return w->colliders[c].force;
 }
 
@@ -486,12 +511,20 @@ static void wake_for_colliders(sl_world *w) {
 }
 
 /* Neighbor lists hold while nothing can have moved more than half the skin by the end of the substep. */
-static int needs_rebuild(sl_world *w) {
+static void check_skin(sl_world *w, int begin, int end, int chunk, void *ctx) {
     float limit = 0.5f * w->skin;
-    for (int k = 0; k < w->active_count; k++) {
+    int far = 0;
+    (void)ctx;
+    for (int k = begin; k < end && !far; k++) {
         int s = w->active[k];
-        if (v3_len(v3_sub(w->x[s], w->x_build[s])) + v3_len(w->v[s]) * w->hs > limit) return 1;
+        far = v3_len(v3_sub(w->x[s], w->x_build[s])) + v3_len(w->v[s]) * w->hs > limit;
     }
+    w->order[chunk] = far;
+}
+
+static int needs_rebuild(sl_world *w) {
+    sl__parallel(w, w->active_count, check_skin, NULL);
+    for (int c = 0; c < sl__chunks(w->active_count); c++) if (w->order[c]) return 1;
     return 0;
 }
 
@@ -593,13 +626,7 @@ int sl_diffuse(const sl_world *w, const sl_vec3 **positions, const sl_vec3 **vel
     return w ? w->diffuse_count : 0;
 }
 
-/* Materials are stored as bytes; this view is rebuilt on request into a scratch array. */
-const sl_material *sl_materials(const sl_world *w) {
-    if (!w) return NULL;
-    sl_world *mw = (sl_world *)w;
-    for (int s = 0; s < w->count; s++) mw->order[s] = w->mat[s];
-    return mw->order;
-}
+const sl_material *sl_materials(const sl_world *w) { return w ? w->material : NULL; }
 
 void sl_get_stats(const sl_world *w, sl_stats *out) {
     if (!w || !out) return;
@@ -610,10 +637,15 @@ void sl_get_stats(const sl_world *w, sl_stats *out) {
     out->contacts = w->contact_count;
     out->islands = w->island_count;
     out->rebuilds = w->rebuilds;
-    size_t per_slot = (w->use_aniso ? 13 : 9) * sizeof(sl_vec3) + 3 * sizeof(float) + 7 + 11 * sizeof(int);
-    out->memory_bytes = sizeof *w + (size_t)w->cap * per_slot + (size_t)w->g.start_cap * sizeof(int)
-        + (size_t)(w->nbr_cap + w->nbr_r_cap) * sizeof(int) + (size_t)(w->contact_cap + w->contact_tmp_cap) * sizeof(contact)
-        + (size_t)w->island_cap * sizeof(int) + (size_t)w->mem_list_cap * sizeof(int)
- + (size_t)w->dist_cap * sizeof(dist_con) + (size_t)w->dist_lambda_cap * sizeof(float)
-        + (size_t)w->member_cap * sizeof(member) + (size_t)w->max_diffuse * (2 * sizeof(sl_vec3) + sizeof(float) + 1) + (size_t)w->cluster_cap * sizeof(cluster);
+    slot_array arrays[32];
+    int count = slot_arrays((sl_world *)w, arrays);   /* only reads the table, nothing is written */
+    size_t bytes = sizeof *w;
+    for (int i = 0; i < count; i++) bytes += (size_t)(w->cap + arrays[i].extra) * arrays[i].elem;
+    bytes += (size_t)w->g.start_cap * sizeof(int) + (size_t)w->nbr_cap * sizeof(int) + (size_t)w->nbr_r_cap * sizeof(float)
+        + (size_t)(w->contact_cap + w->contact_tmp_cap) * sizeof(contact) + (size_t)w->island_cap * sizeof(int)
+        + (size_t)w->mem_list_cap * sizeof(int) + (size_t)(w->dist_cap + w->dist_tmp_cap) * sizeof(dist_con)
+        + (size_t)w->dist_lambda_cap * sizeof(float) + (size_t)w->member_cap * sizeof(member)
+        + (size_t)w->cluster_cap * sizeof(cluster) + (size_t)w->color_cap + (size_t)w->chunk_cap * sizeof(int)
+        + (size_t)w->max_diffuse * (2 * sizeof(sl_vec3) + sizeof(float) + 1);
+    out->memory_bytes = bytes;
 }

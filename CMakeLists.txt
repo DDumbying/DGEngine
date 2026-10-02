@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(slime VERSION 0.1.0 LANGUAGES C)
+project(slime VERSION 0.4.0 LANGUAGES C)
 
 option(SLIME_BUILD_TESTS "Build tests and benchmark" ON)
 option(SLIME_BUILD_DEMO "Build the raylib demo" OFF)
