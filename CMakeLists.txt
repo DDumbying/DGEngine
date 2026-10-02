@@ -1,0 +1,44 @@
+cmake_minimum_required(VERSION 3.16)
+project(slime VERSION 0.1.0 LANGUAGES C)
+
+option(SLIME_BUILD_TESTS "Build tests and benchmark" ON)
+option(SLIME_BUILD_DEMO "Build the raylib demo" OFF)
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+add_library(slime src/world.c src/grid.c src/solve.c src/collide.c)
+target_include_directories(slime PUBLIC include)
+set_target_properties(slime PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+if(MSVC)
+    target_compile_options(slime PRIVATE /W4)
+else()
+    target_compile_options(slime PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_libraries(slime PUBLIC m)
+endif()
+
+if(SLIME_BUILD_TESTS)
+    enable_testing()
+    add_executable(slime_tests tests/test_main.c)
+    target_link_libraries(slime_tests PRIVATE slime)
+    add_test(NAME slime_tests COMMAND slime_tests)
+    add_executable(slime_bench tests/bench.c)
+    target_link_libraries(slime_bench PRIVATE slime)
+endif()
+
+if(SLIME_BUILD_DEMO)
+    find_package(raylib 5.5 QUIET)
+    if(NOT raylib_FOUND)
+        include(FetchContent)
+        set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(raylib
+            GIT_REPOSITORY https://github.com/raysan5/raylib.git
+            GIT_TAG 5.5
+            GIT_SHALLOW TRUE)
+        FetchContent_MakeAvailable(raylib)
+    endif()
+    add_executable(slime_demo demo/demo.c)
+    target_link_libraries(slime_demo PRIVATE slime raylib)
+endif()
