@@ -472,6 +472,187 @@ static void test_no_energy_gain(void) {
     sl_world_destroy(w);
 }
 
+static void test_raycast(void) {
+    sl_world *w = make_world(100);
+    sl_material m = sand(w);
+    sl_particle near = sl_spawn(w, m, (sl_vec3){0, 0, -1}, (sl_vec3){0, 0, 0});
+    sl_spawn(w, m, (sl_vec3){0, 0, -3}, (sl_vec3){0, 0, 0});
+    float d = 0;
+    CHECK(sl_raycast(w, (sl_vec3){0, 0, 0}, (sl_vec3){0, 0, -1}, 10, &d) == near, "ray missed the nearest particle");
+    CHECK(fabsf(d - (1 - R)) < 1e-4f, "hit distance %f", d);
+    CHECK(sl_raycast(w, (sl_vec3){0, 0, 0}, (sl_vec3){0, 1, 0}, 10, NULL) == -1, "ray hit empty space");
+    CHECK(sl_raycast(w, (sl_vec3){0, 0, 0}, (sl_vec3){0, 0, -1}, 0.5f, NULL) == -1, "ray ignored max distance");
+    sl_world_destroy(w);
+}
+
+static void test_grab_and_throw(void) {
+    sl_world *w = make_world(2000);
+    add_floor(w, 0.5f);
+    sl_object body = sl_softbody_create_box(w, solid(w), (sl_vec3){-0.15f, 0, -0.15f}, (sl_vec3){0.15f, 0.3f, 0.15f}, 0.8f, 0);
+    steps(w, 60);
+    const sl_particle *ids;
+    int n = sl_object_particles(w, body, &ids);
+    sl_particle handle = ids[n - 1];
+    CHECK(sl_grab_begin(w, handle) == 1, "grab failed");
+    sl_vec3 start = sl_position(w, handle);
+    for (int s = 1; s <= 60; s++) {
+        sl_grab_move(w, handle, (sl_vec3){start.x + 0.02f * (float)s, start.y + 0.015f * (float)s, start.z});
+        sl_step(w, DT);
+    }
+    float cy = 0;
+    for (int i = 0; i < n; i++) cy += sl_position(w, ids[i]).y / (float)n;
+    CHECK(cy > 0.5f, "body did not follow the grab: center y %f", cy);
+    sl_vec3 v = sl_velocity(w, handle);
+    sl_grab_end(w, handle);
+    CHECK(v.x > 0.8f, "grabbed particle has no throw velocity: %f", v.x);
+    sl_step(w, DT);
+    CHECK(sl_velocity(w, handle).x > 0.5f, "release lost the throw: %f", sl_velocity(w, handle).x);
+    steps(w, 120);
+    CHECK(all_finite(w), "non-finite positions");
+    sl_world_destroy(w);
+}
+
+static void test_collider_toggle(void) {
+    sl_world *w = make_world(10);
+    sl_collider_desc c = {0};
+    c.shape = SL_PLANE;
+    sl_collider floor = sl_collider_add(w, &c);
+    sl_particle p = sl_spawn(w, sand(w), (sl_vec3){0, 0.5f, 0}, (sl_vec3){0, 0, 0});
+    steps(w, 60);
+    CHECK(sl_position(w, p).y > 0, "floor did not hold");
+    sl_collider_set_enabled(w, floor, 0);
+    CHECK(!sl_collider_enabled(w, floor), "collider still enabled");
+    steps(w, 30);
+    CHECK(sl_position(w, p).y < -0.2f, "disabled floor still holds: %f", sl_position(w, p).y);
+    sl_collider_remove(w, floor);
+    sl_collider again = sl_collider_add(w, &c);
+    CHECK(again == floor, "removed slot not reused");
+    sl_world_destroy(w);
+}
+
+static void test_remove_sphere(void) {
+    sl_world *w = make_world(3000);
+    sl_spawn_box(w, sand(w), (sl_vec3){-0.5f, 0, -0.5f}, (sl_vec3){0.5f, 0.1f, 0.5f});
+    sl_object rope = sl_rope_create(w, solid(w), (sl_vec3){-1, 1, 0}, (sl_vec3){1, 1, 0}, 0);
+    int before = sl_count(w), rope_n = sl_object_particles(w, rope, NULL);
+    int gone = sl_remove_sphere(w, (sl_vec3){0, 0.05f, 0}, 0.22f);
+    CHECK(gone > 10 && sl_count(w) == before - gone, "removed %d, count %d of %d", gone, sl_count(w), before);
+    gone = sl_remove_sphere(w, (sl_vec3){0.9f, 1, 0}, 0.06f);
+    CHECK(gone == rope_n, "rope not removed whole: %d of %d", gone, rope_n);
+    CHECK(sl_object_particles(w, rope, NULL) == 0, "rope still alive");
+    steps(w, 10);
+    sl_world_destroy(w);
+}
+
+static void test_anisotropy(void) {
+    sl_world_desc d = {0};
+    d.max_particles = 8000;
+    d.particle_radius = R;
+    d.gravity = (sl_vec3){0, -9.81f, 0};
+    d.anisotropy = 1;
+    sl_world *w = sl_world_create(&d);
+    add_container(w, (sl_vec3){0.5f, 1.0f, 0.5f});
+    sl_spawn_box(w, water(w), (sl_vec3){-0.5f, -1.0f, -0.5f}, (sl_vec3){0.5f, -0.4f, 0.5f});
+    steps(w, 200);
+    const sl_vec3 *a = sl_anisotropy(w), *p = sl_positions(w);
+    CHECK(a != NULL, "no anisotropy output");
+    float top = max_height(w), flat_top = 0, flat_mid = 0;
+    int n_top = 0, n_mid = 0;
+    for (int s = 0; s < sl_count(w); s++) {
+        if (fabsf(p[s].x) > 0.3f || fabsf(p[s].z) > 0.3f) continue;
+        float shortest = 1e9f, longest = 0, vertical = 0;
+        for (int k = 1; k <= 3; k++) {
+            float l = sqrtf(a[4 * s + k].x * a[4 * s + k].x + a[4 * s + k].y * a[4 * s + k].y + a[4 * s + k].z * a[4 * s + k].z);
+            if (l < shortest) { shortest = l; vertical = fabsf(a[4 * s + k].y) / l; }
+            if (l > longest) longest = l;
+        }
+        if (p[s].y > top - 0.02f) { flat_top += (longest / shortest) * vertical; n_top++; }
+        else if (p[s].y < -0.8f && p[s].y > -0.85f) { flat_mid += longest / shortest; n_mid++; }
+    }
+    CHECK(n_top > 0 && flat_top / (float)n_top > 1.5f, "surface not flattened upward: %f", n_top ? flat_top / (float)n_top : 0);
+    CHECK(n_mid > 0 && flat_mid / (float)n_mid < 1.6f, "interior not round: %f", n_mid ? flat_mid / (float)n_mid : 0);
+    sl_world_destroy(w);
+}
+
+static void test_diffuse(void) {
+    sl_world_desc d = {0};
+    d.max_particles = 8000;
+    d.particle_radius = R;
+    d.gravity = (sl_vec3){0, -9.81f, 0};
+    d.max_diffuse = 20000;
+    sl_world *w = sl_world_create(&d);
+    add_container(w, (sl_vec3){0.8f, 1.0f, 0.5f});
+    sl_spawn_box(w, water(w), (sl_vec3){-0.8f, -1.0f, -0.5f}, (sl_vec3){-0.3f, 0.6f, 0.5f});
+    int peak = 0;
+    for (int s = 0; s < 120; s++) { sl_step(w, DT); int n = sl_diffuse(w, NULL, NULL, NULL, NULL); if (n > peak) peak = n; }
+    CHECK(peak > 50, "a dam break made only %d spray particles", peak);
+    for (int s = 0; s < 900; s++) sl_step(w, DT);
+    CHECK(sl_diffuse(w, NULL, NULL, NULL, NULL) < peak / 4, "spray did not fade: %d of %d", sl_diffuse(w, NULL, NULL, NULL, NULL), peak);
+    sl_world_destroy(w);
+}
+
+static float pile_height(float friction) {
+    sl_world *w = make_world(3000);
+    add_floor(w, 0.8f);
+    sl_material m = sl_material_add(w, &(sl_material_desc){.kind = SL_GRANULAR, .density = 1600, .friction = friction});
+    unsigned seed = 7;
+    for (int s = 0; s < 900; s++) {
+        if (s % 2 == 0 && s < 500) {
+            seed = seed * 1664525u + 1013904223u;
+            float jx = (float)(seed >> 8) / 16777216.0f - 0.5f;
+            seed = seed * 1664525u + 1013904223u;
+            float jz = (float)(seed >> 8) / 16777216.0f - 0.5f;
+            sl_spawn(w, m, (sl_vec3){jx * 0.05f, 1.5f, jz * 0.05f}, (sl_vec3){0, -1, 0});
+        }
+        sl_step(w, DT);
+    }
+    float hgt = max_height(w);
+    sl_world_destroy(w);
+    return hgt;
+}
+
+static void test_pile_angle(void) {
+    float slick = pile_height(0.2f), rough = pile_height(0.8f);
+    CHECK(rough > slick + 0.2f, "rough pile %f not taller than slick %f", rough, slick);
+}
+
+static int lifted_with(float cohesion) {
+    sl_world *w = make_world(2000);
+    add_floor(w, 0.8f);
+    sl_material m = sl_material_add(w, &(sl_material_desc){.kind = SL_GRANULAR, .density = 1600, .friction = 0.5f, .wet_cohesion = cohesion});
+    sl_material wm = water(w);
+    sl_spawn_box(w, m, (sl_vec3){-0.15f, 0.0f, -0.15f}, (sl_vec3){0.15f, 0.3f, 0.15f});
+    sl_spawn_box(w, wm, (sl_vec3){-0.15f, 0.32f, -0.15f}, (sl_vec3){0.15f, 0.42f, 0.15f});
+    steps(w, 40);
+    for (int s = sl_count(w) - 1; s >= 0; s--)
+        if (sl_materials(w)[s] == wm) sl_remove(w, sl_ids(w)[s]);
+    steps(w, 10);
+    sl_particle top = sl_raycast(w, (sl_vec3){0, 2, 0}, (sl_vec3){0, -1, 0}, 5, NULL);
+    sl_vec3 start = sl_position(w, top);
+    sl_grab_begin(w, top);
+    for (int s = 1; s <= 40; s++) { sl_grab_move(w, top, (sl_vec3){start.x, start.y + 0.008f * (float)s, start.z}); sl_step(w, DT); }
+    int lifted = 0;
+    for (int s = 0; s < sl_count(w); s++) if (sl_positions(w)[s].y > 0.3f + 0.08f) lifted++;
+    sl_world_destroy(w);
+    return lifted;
+}
+
+static void test_wet_sand(void) {
+    sl_world *w = make_world(1000);
+    sl_material m = sand(w), wm = water(w);
+    add_floor(w, 0.5f);
+    sl_spawn_box(w, m, (sl_vec3){-0.1f, 0, -0.1f}, (sl_vec3){0.1f, 0.1f, 0.1f});
+    sl_spawn_box(w, wm, (sl_vec3){-0.1f, 0.15f, -0.1f}, (sl_vec3){0.1f, 0.35f, 0.1f});
+    steps(w, 60);
+    const unsigned char *wet = sl_wetness(w);
+    int soaked = 0;
+    for (int s = 0; s < sl_count(w); s++) if (sl_materials(w)[s] == m && wet[s] > 200) soaked++;
+    CHECK(soaked > 0, "no grain got wet");
+    sl_world_destroy(w);
+    int dry = lifted_with(0), damp = lifted_with(1);
+    CHECK(damp > dry + 2, "wet clump lifted %d grains, dry %d", damp, dry);
+}
+
 static void test_limits(void) {
     CHECK(sl_world_create(NULL) == NULL, "null desc accepted");
     sl_world_desc bad = {0};
@@ -546,6 +727,14 @@ int main(int argc, char **argv) {
         {"large dt", test_large_dt},
         {"drop from height", test_drop_from_height},
         {"no energy gain", test_no_energy_gain},
+        {"raycast", test_raycast},
+        {"grab and throw", test_grab_and_throw},
+        {"collider toggle", test_collider_toggle},
+        {"remove sphere", test_remove_sphere},
+        {"anisotropy", test_anisotropy},
+        {"diffuse", test_diffuse},
+        {"pile angle", test_pile_angle},
+        {"wet sand", test_wet_sand},
         {"limits", test_limits},
         {"allocator", test_allocator},
     };

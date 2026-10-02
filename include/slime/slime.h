@@ -47,6 +47,8 @@ typedef struct {
     int fluid_iterations;    /* fluid pressure passes per substep, 0 means 2 */
     float sleep_speed;       /* resting things slower than this sleep; 0 means radius/s, < 0 off */
     int workers;             /* threads for the built-in pool, 0 or 1 means single threaded */
+    int anisotropy;          /* compute fluid surface ellipsoids each step, see sl_anisotropy */
+    int max_diffuse;         /* spray, foam and bubble particles, 0 means none */
     sl_task_system tasks;    /* optional, use your own job system instead of the pool */
     sl_allocator allocator;  /* all zero means malloc/free */
 } sl_world_desc;
@@ -56,9 +58,10 @@ typedef struct {
     float density;    /* kg/m^3, sets particle mass */
     float viscosity;  /* fluid: 0..1 velocity smoothing */
     float cohesion;   /* fluid: pull between nearby particles */
-    float friction;   /* granular and solid: friction on contact */
+    float friction;   /* granular and solid: friction on contact; for sand it sets how steep piles get */
     float vorticity;  /* fluid: keeps swirls alive, around 0.1 */
     float damping;    /* share of velocity lost per second, like air drag */
+    float wet_cohesion;      /* granular: how strongly wet grains stick together, 0..1 */
 } sl_material_desc;
 
 typedef struct {
@@ -105,6 +108,19 @@ sl_collider sl_collider_add(sl_world *w, const sl_collider_desc *desc);
 void sl_collider_move(sl_world *w, sl_collider c, sl_vec3 position, const float rotation[4]);
 /* Force particles put on the collider during the last step, to feed a rigid-body engine. */
 sl_vec3 sl_collider_force(const sl_world *w, sl_collider c);
+void sl_collider_set_enabled(sl_world *w, sl_collider c, int enabled);
+int sl_collider_enabled(const sl_world *w, sl_collider c);
+/* The id may be handed out again by a later sl_collider_add. */
+void sl_collider_remove(sl_world *w, sl_collider c);
+
+/* Nearest particle hit by a ray, -1 if none; hit_dist may be NULL. */
+sl_particle sl_raycast(const sl_world *w, sl_vec3 origin, sl_vec3 dir, float max_dist, float *hit_dist);
+/* Hold a particle and move it to target each step; on release it keeps its velocity, so it can be thrown. */
+int sl_grab_begin(sl_world *w, sl_particle p);
+void sl_grab_move(sl_world *w, sl_particle p, sl_vec3 target);
+void sl_grab_end(sl_world *w, sl_particle p);
+/* Removes loose particles inside the sphere and whole objects that reach into it; returns the count. */
+int sl_remove_sphere(sl_world *w, sl_vec3 center, float radius);
 
 /* Compliance is softness: 0 is stiff, larger stretches more. Particles are spaced about 2 * radius. */
 sl_object sl_rope_create(sl_world *w, sl_material m, sl_vec3 a, sl_vec3 b, float compliance);
@@ -127,6 +143,16 @@ const sl_vec3 *sl_positions(const sl_world *w);
 const sl_vec3 *sl_velocities(const sl_world *w);
 const sl_material *sl_materials(const sl_world *w);
 const sl_particle *sl_ids(const sl_world *w);
+
+/* 0 dry to 255 soaked, per slot; grains touching fluid get wet and dry over a few seconds. */
+const unsigned char *sl_wetness(const sl_world *w);
+/* Per slot: smoothed center then three ellipsoid axes, 4 vectors each; needs desc.anisotropy. */
+const sl_vec3 *sl_anisotropy(const sl_world *w);
+
+typedef enum { SL_SPRAY, SL_FOAM, SL_BUBBLE } sl_diffuse_kind;
+/* Spray, foam and bubbles thrown off by fast water; any output pointer may be NULL. */
+int sl_diffuse(const sl_world *w, const sl_vec3 **positions, const sl_vec3 **velocities, const unsigned char **kinds,
+               const float **life);
 
 float sl_particle_radius(const sl_world *w);
 void sl_get_stats(const sl_world *w, sl_stats *out);

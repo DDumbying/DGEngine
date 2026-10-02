@@ -37,6 +37,16 @@ static float sdf_local(const sl_collider_desc *d, sl_vec3 p, sl_vec3 *n) {
     }
 }
 
+/* World space signed distance at the collider's current transform, with outward normal. */
+float collider_distance(const collider *col, sl_vec3 p, sl_vec3 *n) {
+    quat rot = col->desc.shape == SL_PLANE ? q_identity() : col->rot;
+    sl_vec3 local = q_rotate(q_conj(rot), v3_sub(p, col->desc.position)), ln;
+    float d = sdf_local(&col->desc, local, &ln);
+    if (col->desc.inside) { d = -d; ln = v3_scale(ln, -1.0f); }
+    *n = q_rotate(rot, ln);
+    return d;
+}
+
 static void frame(const collider *col, float t, sl_vec3 *pos, quat *rot) {
     *pos = v3_lerp(col->prev_pos, col->desc.position, t);
     *rot = col->desc.shape == SL_PLANE ? q_identity() : q_nlerp(col->prev_rot, col->rot, t);
@@ -102,6 +112,7 @@ float wall_density(sl_world *w, int i, sl_vec3 *grad, float scale) {
     for (int c = 0; c < w->collider_count; c++) {
         const collider *col = &w->colliders[c];
         const sl_collider_desc *d = &col->desc;
+        if (!col->enabled) continue;
         sl_vec3 n;
         sl_vec3 local = q_rotate(q_conj(col->rot_t), v3_sub(w->p[i], col->pos_t));
         if (d->shape == SL_BOX && d->inside) {
@@ -158,6 +169,7 @@ static void collide_range(sl_world *w, int begin, int end, int chunk, void *ctx)
     for (int c = 0; c < w->collider_count; c++) {
         const collider *col = &w->colliders[c];
         const sl_collider_desc *d = &col->desc;
+        if (!col->enabled) continue;
         int container = d->shape == SL_BOX && d->inside;
         int can_tunnel = !d->inside && d->shape != SL_PLANE;
         quat inv = q_conj(col->rot_t);
@@ -165,7 +177,7 @@ static void collide_range(sl_world *w, int begin, int end, int chunk, void *ctx)
 
         for (int k = begin; k < end; k++) {
             int i = w->active[k];
-            if (w->flags[i] & F_PINNED) continue;
+            if (w->flags[i] & F_KINEMATIC) continue;
             if (can_tunnel) sweep(w, i, col);
             sl_vec3 local = q_rotate(inv, v3_sub(w->p[i], col->pos_t));
             sl_vec3 move = v3_sub(v3_add(col->pos_t, q_rotate(col->rot_t, local)),

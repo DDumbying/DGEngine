@@ -69,8 +69,8 @@ static void reorder(sl_world *w) {
     w->tmp = vs; w->lambda = fs; w->island = is;
 
     unsigned char *bytes = (unsigned char *)g->bucket;
-    unsigned char *barr[] = {w->flags, w->calm, w->mat};
-    for (int a = 0; a < 3; a++) {
+    unsigned char *barr[] = {w->flags, w->calm, w->mat, w->wet};
+    for (int a = 0; a < 4; a++) {
         for (int k = 0; k < n; k++) bytes[k] = barr[a][g->sorted[k]];
         memcpy(barr[a], bytes, (size_t)n);
     }
@@ -296,5 +296,50 @@ int grid_rebuild(sl_world *w, int move) {
 
     build_islands(w);
     update_islands(w);
+    w->built = n;
     return 1;
+}
+
+/* Fluid particles within the kernel radius of x and their average velocity, from the last grid build. */
+int grid_fluid_near(sl_world *w, sl_vec3 x, sl_vec3 *avg_vel) {
+    const grid *g = &w->g;
+    float h2 = w->h * w->h;
+    int n = 0;
+    sl_vec3 v = v3(0, 0, 0);
+    if (!g->start || w->count == 0) { *avg_vel = v; return 0; }
+    if (g->dense) {
+        int ix = (int)floorf((x.x - g->origin.x) / g->cell), iy = (int)floorf((x.y - g->origin.y) / g->cell), iz = (int)floorf((x.z - g->origin.z) / g->cell);
+        for (int z = iz - 1; z <= iz + 1; z++)
+            for (int y = iy - 1; y <= iy + 1; y++) {
+                if (z < 0 || z >= g->nz || y < 0 || y >= g->ny) continue;
+                int x0 = ix - 1 < 0 ? 0 : ix - 1, x1 = ix + 1 >= g->nx ? g->nx - 1 : ix + 1;
+                if (x0 > x1) continue;
+                int row = g->nx * (y + g->ny * z);
+                for (int t = g->start[row + x0]; t < g->start[row + x1 + 1]; t++) {
+                    int s = g->sorted[t];
+                    if (s >= w->count || !(w->flags[s] & F_FLUID) || v3_len2(v3_sub(w->x[s], x)) >= h2) continue;
+                    v = v3_add(v, w->v[s]);
+                    n++;
+                }
+            }
+    } else {
+        int buckets[27], nb = 0, mask = g->table_size - 1;
+        int cx = cell_coord(x.x, g->cell), cy = cell_coord(x.y, g->cell), cz = cell_coord(x.z, g->cell);
+        for (int dz = -1; dz <= 1; dz++)
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++) {
+                    int b = hash_cell(cx + dx, cy + dy, cz + dz, mask), dup = 0;
+                    for (int k = 0; k < nb && !dup; k++) dup = buckets[k] == b;
+                    if (!dup) buckets[nb++] = b;
+                }
+        for (int b = 0; b < nb; b++)
+            for (int t = g->start[buckets[b]]; t < g->start[buckets[b] + 1]; t++) {
+                int s = g->sorted[t];
+                if (s >= w->count || !(w->flags[s] & F_FLUID) || v3_len2(v3_sub(w->x[s], x)) >= h2) continue;
+                v = v3_add(v, w->v[s]);
+                n++;
+            }
+    }
+    *avg_vel = n ? v3_scale(v, 1.0f / (float)n) : v;
+    return n;
 }

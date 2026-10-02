@@ -8,7 +8,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-add_library(slime src/world.c src/grid.c src/solve.c src/collide.c src/objects.c src/threads.c)
+add_library(slime src/world.c src/grid.c src/solve.c src/collide.c src/objects.c src/threads.c src/extras.c)
 find_package(Threads REQUIRED)
 target_link_libraries(slime PRIVATE Threads::Threads)
 target_include_directories(slime PUBLIC include)
