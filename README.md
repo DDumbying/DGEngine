@@ -1,35 +1,44 @@
 # slime
 
-**slime** is a small C library for real-time 3D particle physics: water that splashes and levels out,
-sand that piles up, and colliders that push through both. It is built on position based dynamics
-(PBD) with many small substeps, the same family of methods used by NVIDIA FleX and Obi.
+**slime** is a small C library for real-time 3D particle physics: water that splashes, levels out
+and pushes things around, sand that piles up and sinks, cloth and ropes that hang and swing, and
+soft, squishy bodies that wobble and dent. Everything is made of particles in one solver, built on
+position based dynamics with many small substeps, the same family of methods used by NVIDIA FleX
+and Obi.
 
-![demo](docs/demo.png)
+| | |
+|---|---|
+| ![water and sand](docs/water.png) | ![slime](docs/slime.png) |
+| ![rope bridge](docs/bridge.png) | ![curtain](docs/curtain.png) |
 
 ## Why
 
-Unified particle physics (fluids, sand, cloth, soft bodies in one solver) is a great fit for games,
-but the options are thin: FleX is no longer maintained and tied to NVIDIA hardware, and Obi is
-paid and Unity-only. slime aims to be the free, portable, engine-agnostic option:
+Unified particle physics is a great fit for games, but the options are thin: FleX is no longer
+maintained and tied to NVIDIA hardware, and Obi is paid and Unity-only. slime aims to be the free,
+portable, engine-agnostic option:
 
-- Plain C11, one public header, no dependencies besides libm.
+- Plain C11, one public header, no dependencies besides libm and threads.
 - No window, renderer or global state. You step it and read positions back.
-- You control memory through an allocator hook.
-- Deterministic on the same build: same input, same result, bit for bit.
+- Fast: multithreaded, and calm scenes go to sleep and cost almost nothing.
+- Lean: memory grows with what you use, you control it through an allocator hook.
+- Deterministic: same input, same result, bit for bit, for any number of threads.
 - MIT licensed.
 
-## Status: v0.1
+## Features
 
-| Feature | State |
+| Feature | Notes |
 |---|---|
-| Fluids (position based fluids, viscosity, cohesion) | yes |
-| Granular materials (friction, piling, sleeping) | yes |
-| Fluid and sand mixing, sand sinks in water | yes |
-| Colliders: plane, box, sphere, capsule, moving and rotating | yes |
-| Container boxes (keep particles inside) | yes |
-| Cloth, ropes, soft bodies | planned |
-| Mesh colliders, two-way rigid body coupling | planned |
-| Multithreading | planned |
+| Fluids | Position based fluids, viscosity, cohesion, vorticity, walls that hold water at rest density |
+| Granular | Friction, piling with shock propagation, settles still |
+| Ropes and cloth | Distance and bending constraints with compliance, pinning |
+| Soft bodies | Shape matching with stiffness and plasticity, so they can keep dents |
+| Two-way coupling | Water pushes solids: light bodies float, heavy ones sink, cloth gets pushed |
+| Colliders | Plane, box, sphere, capsule; moving and rotating; boxes can be containers |
+| Collider forces | Read the force particles put on each collider and feed it to a rigid-body engine |
+| Stable ids | Particle handles stay valid while memory is reordered for speed |
+| Sleeping | Calm islands of particles stop simulating until something touches them |
+| Threads | Built-in pool, or plug in your own job system |
+| Robustness | Swept tests stop fast particles tunneling through thin walls; bad values are caught |
 
 ## Example
 
@@ -38,24 +47,27 @@ paid and Unity-only. slime aims to be the free, portable, engine-agnostic option
 
 int main(void) {
     sl_world_desc desc = {0};
-    desc.max_particles = 10000;
+    desc.max_particles = 20000;
     desc.particle_radius = 0.05f;
     desc.gravity = (sl_vec3){0, -9.81f, 0};
+    desc.workers = 4;
     sl_world *world = sl_world_create(&desc);
 
     sl_material water = sl_material_add(world, &(sl_material_desc){.kind = SL_FLUID, .density = 1000, .viscosity = 0.02f});
     sl_material sand = sl_material_add(world, &(sl_material_desc){.kind = SL_GRANULAR, .density = 1600, .friction = 0.8f});
+    sl_material jelly = sl_material_add(world, &(sl_material_desc){.kind = SL_SOLID, .density = 900, .damping = 0.5f});
 
     sl_collider_add(world, &(sl_collider_desc){.shape = SL_BOX, .half_extents = {1, 1, 1}, .inside = 1, .friction = 0.4f});
 
     sl_spawn_box(world, water, (sl_vec3){-1, -1, -1}, (sl_vec3){0, 0, 1});
     sl_spawn_box(world, sand, (sl_vec3){0.2f, 0, -0.3f}, (sl_vec3){0.8f, 0.6f, 0.3f});
+    sl_softbody_create_box(world, jelly, (sl_vec3){-0.6f, 0.4f, -0.2f}, (sl_vec3){-0.2f, 0.8f, 0.2f}, 0.1f, 0.2f);
 
     for (int frame = 0; frame < 600; frame++) {
         sl_step(world, 1.0f / 60.0f);
         const sl_vec3 *pos = sl_positions(world);
         const sl_material *mat = sl_materials(world);
-        /* draw sl_count(world) particles from pos / mat with your renderer */
+        /* draw sl_count(world) particles from pos and mat with your renderer */
         (void)pos; (void)mat;
     }
 
@@ -64,13 +76,17 @@ int main(void) {
 }
 ```
 
+Bulk arrays come in internal order, which changes between steps as slime reorders memory. When you
+need a specific particle, keep its `sl_particle` id and use `sl_position`, or map slots to ids with
+`sl_ids`.
+
 ## Building
 
 ```sh
 cmake -B build
 cmake --build build
 ctest --test-dir build --output-on-failure   # headless tests
-./build/slime_bench                          # timing
+./build/slime_bench                          # timing and memory
 ```
 
 To use it in your own CMake project:
@@ -83,56 +99,86 @@ target_link_libraries(your_game PRIVATE slime)
 ### Demo
 
 The demo uses [raylib](https://www.raylib.com). If raylib 5.5 is not installed, CMake fetches it.
+Water and slime are drawn with screen-space fluid rendering: particle depth is smoothed into one
+surface, then shaded with refraction, absorption and reflection.
 
 ```sh
 cmake -B build-demo -DSLIME_BUILD_DEMO=ON
 cmake --build build-demo
-./build-demo/slime_demo
+./build-demo/slime_demo            # add --workers N to change the thread count
 ```
 
 | Input | Action |
 |---|---|
-| `1` (hold) | Pour water |
-| `2` | Drop a block of sand |
+| `1` to `4` | Scenes: water and sand, rope bridge, curtain, slime |
+| `W` (hold), `S`, `G` | Pour water, drop sand, drop a slime blob |
 | Arrows, `PgUp`, `PgDn` | Move the red ball |
 | Right mouse drag, wheel | Orbit, zoom |
-| `Space`, `R`, `C` | Pause, reset, clear |
+| `Space`, `R` | Pause, reset |
+
+## Using slime with a rigid-body engine
+
+slime colliders are moved by you and push particles. To let particles push back, read
+`sl_collider_force` after each step and apply it to the matching body in your rigid-body engine
+(Jolt, Box2D, PhysX, Bullet), then move the collider to where that body went:
+
+```c
+sl_step(world, dt);
+sl_vec3 f = sl_collider_force(world, boat_collider);   /* buoyancy and splashes */
+your_engine_add_force(boat_body, f);
+your_engine_step(dt);
+sl_collider_move(world, boat_collider, your_engine_position(boat_body), your_engine_rotation(boat_body));
+```
+
+Forces keep coming from particles that have gone to sleep, so a resting load stays a load.
 
 ## How it works
 
-Each `sl_step` finds neighbor pairs once with a spatial hash, then runs a number of substeps
-(6 by default). Every substep:
+Each step finds neighbor pairs on a dense grid, with a small safety margin so the lists can be
+reused while nothing has moved far; fast motion triggers a refresh before any substep. Particles are
+reordered in memory by grid cell so neighbors are close in cache. Then, for each of the substeps
+(4 by default):
 
-1. Applies gravity and predicts new positions.
-2. Solves fluid density constraints so water keeps its volume. Walls add density as if fluid
-   continued behind them, so water does not pack against them.
-3. Solves grain contacts with friction a few times (4 by default), with shock propagation so
-   piles carry their own weight, then resolves colliders.
-4. Derives velocities from the position change and applies fluid viscosity and cohesion.
+1. Apply gravity and predict new positions.
+2. Solve fluid density twice so water keeps its volume. Walls add density as if fluid continued
+   behind them, and solids get the opposite of the push they give the water.
+3. Solve grain contacts, ropes and cloth (graph-colored so each color runs in parallel), soft-body
+   shape matching and colliders, a few passes each.
+4. Derive velocities from the position change.
 
-Grains that are touching something and barely moving over a whole step are held in place
-(`sleep_speed`), which stops the slow creep PBD piles otherwise have.
+After the substeps, viscosity, vorticity and cohesion run once, then each particle checks whether
+it is calm. Groups of particles that can touch each other form islands, and an island that has been
+calm for half a second sleeps until something wakes it.
 
 ## Performance
 
-Single thread, `Release` build, mixed water and sand in a container, on a 2.1 GHz Xeon core:
+`slime_bench` on a 4 vCPU 2.1 GHz cloud Xeon, `Release` build. "First 1 s" is a dam break of water
+next to a sand block, the most violent part; "after 26 s" is the same scene once it has settled.
 
-| Particles | ms per step |
-|---|---|
-| 1,500 | 5 |
-| 4,200 | 16 |
-| 8,400 | 34 |
+| Particles | Threads | First 1 s, ms/step | After 26 s, ms/step |
+|---|---|---|---|
+| 1,500 | 1 | 7.4 | 0.03 |
+| 1,500 | 4 | 3.9 | 0.02 |
+| 8,400 | 1 | 48.7 | 0.11 |
+| 8,400 | 4 | 22.6 | 0.28 |
+| 14,000 | 1 | 90.1 | 0.26 |
+| 14,000 | 4 | 40.3 | 0.32 |
 
-Multithreading is the next step; most of the solver runs in independent passes over particles
-and pairs, so it splits across cores well.
+Memory is about 700 to 850 bytes per particle, including headroom for the busiest moment. The
+violent case is still slower than the goal of 10k particles under 8 ms on 4 cores; the remaining
+costs are the fluid pressure passes and the neighbor rebuilds that fast water needs, and they are
+the next things to work on.
 
 ## Notes
 
 - Units are meters, kilograms and seconds. Particles sit `2 * particle_radius` apart at rest.
-- Results are identical across runs of the same build. Bit-identical results across different
-  compilers or platforms are not promised yet.
-- `sl_remove` moves the last particle into the removed slot, so indices can change.
+- Results are identical for any worker count on the same build. Bit-identical results across
+  different compilers or platforms are not promised yet.
+- Grains heavier than water sink but come to rest on a thin cushion of water about two particles
+  above the floor, because the particle fluid is very slightly compressible with depth.
+- Particles that belong to a rope, cloth or soft body are removed with `sl_object_destroy`.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). The demo font, Patrick Hand by Patrick Wagesreiter, is under the SIL
+Open Font License, see [demo/fonts/OFL.txt](demo/fonts/OFL.txt).

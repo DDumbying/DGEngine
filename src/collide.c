@@ -75,72 +75,111 @@ static float wall_sample(const sl_world *w, float z, float *slope) {
     return a + (b - a) * (f - (float)k);
 }
 
-static void add_wall(const sl_world *w, float dist, sl_vec3 n, float *rho, sl_vec3 *grad) {
-    float slope, v = wall_sample(w, dist + w->radius, &slope);
-    if (v <= 0) return;
-    *rho += v;
-    *grad = v3_add(*grad, v3_scale(n, slope));
+typedef struct { float rho; sl_vec3 grad; } wall_sum;
+
+/* Each particle remembers what it gave to up to two colliders, so sleeping particles still load them. */
+void book_push(sl_world *w, int i, int collider, sl_vec3 impulse) {
+    unsigned char id = (unsigned char)(collider + 1), *ids = &w->push_id[2 * i];
+    int k = ids[0] == id || ids[0] == 0 ? 0 : 1;
+    if (ids[k] != id && ids[k] != 0) return;
+    ids[k] = id;
+    w->push[2 * i + k] = v3_add(w->push[2 * i + k], impulse);
 }
 
-float wall_density(const sl_world *w, int i, sl_vec3 *grad) {
-    float rho = 0;
-    *grad = v3(0, 0, 0);
+static void add_wall(sl_world *w, int i, int c, float dist, sl_vec3 n, wall_sum *sum, float scale) {
+    float slope, v = wall_sample(w, dist + w->radius, &slope);
+    if (v <= 0) return;
+    sl_vec3 g = v3_scale(n, slope);
+    sum->rho += v;
+    sum->grad = v3_add(sum->grad, g);
+    if (scale != 0) book_push(w, i, c, v3_scale(g, -scale));
+}
+
+/* Wall density and its gradient at particle i; a nonzero scale also books the push per collider. */
+float wall_density(sl_world *w, int i, sl_vec3 *grad, float scale) {
+    wall_sum sum = {0, v3(0, 0, 0)};
+    float reach = w->h + w->radius;
     for (int c = 0; c < w->collider_count; c++) {
         const collider *col = &w->colliders[c];
         const sl_collider_desc *d = &col->desc;
-        sl_vec3 pos = col->pos_t, n;
-        quat rot = col->rot_t;
-        sl_vec3 local = q_rotate(q_conj(rot), v3_sub(w->p[i], pos));
+        sl_vec3 n;
+        sl_vec3 local = q_rotate(q_conj(col->rot_t), v3_sub(w->p[i], col->pos_t));
         if (d->shape == SL_BOX && d->inside) {
             const float *lp = &local.x, *b = &d->half_extents.x;
             for (int a = 0; a < 3; a++) {
+                float dist = b[a] - fabsf(lp[a]);
+                if (dist > reach) continue;
                 n = v3(0, 0, 0);
                 (&n.x)[a] = lp[a] > 0 ? -1.0f : 1.0f;
-                add_wall(w, b[a] - fabsf(lp[a]), q_rotate(rot, n), &rho, grad);
+                add_wall(w, i, c, dist, q_rotate(col->rot_t, n), &sum, scale);
             }
             continue;
         }
         float dist = sdf_local(d, local, &n);
         if (d->inside) { dist = -dist; n = v3_scale(n, -1.0f); }
-        add_wall(w, dist, q_rotate(rot, n), &rho, grad);
+        if (dist < reach) add_wall(w, i, c, dist, q_rotate(col->rot_t, n), &sum, scale);
     }
-    return rho;
+    *grad = sum.grad;
+    return sum.rho;
 }
 
-static void contact(sl_world *w, int i, sl_vec3 n, float pen, sl_vec3 surf_move, float mu) {
-    w->touch[i] = 1;
-    w->p[i] = v3_add(w->p[i], v3_scale(n, pen));
+static void push_out(sl_world *w, int i, sl_vec3 n, float pen, sl_vec3 surf_move, float mu, int c) {
+    sl_vec3 before = w->p[i];
+    w->flags[i] |= F_TOUCH;
+    w->p[i] = v3_madd(w->p[i], n, pen);
     sl_vec3 rel = v3_sub(v3_sub(w->p[i], w->x[i]), surf_move);
     sl_vec3 tan = v3_sub(rel, v3_scale(n, v3_dot(rel, n)));
     float tl = v3_len(tan);
-    if (tl <= 1e-9f) return;
-    float f = tl < mu * pen ? 1.0f : fminf(mu * pen / tl, 1.0f);
-    w->p[i] = v3_sub(w->p[i], v3_scale(tan, f));
+    if (tl > 1e-9f) {
+        float f = tl < mu * pen ? 1.0f : fminf(mu * pen / tl, 1.0f);
+        w->p[i] = v3_madd(w->p[i], tan, -f);
+    }
+    book_push(w, i, c, v3_scale(v3_sub(w->p[i], before), -w->mass[i] / w->hs));
 }
 
-void collide_particles(sl_world *w) {
+/* Steps along the move of a fast particle so it cannot pass through a thin collider. */
+static void sweep(sl_world *w, int i, const collider *col) {
+    sl_vec3 from = w->x[i], dir = v3_sub(w->p[i], from), n;
+    float len = v3_len(dir), r = w->radius, t = 0;
+    if (len <= r) return;
+    dir = v3_scale(dir, 1.0f / len);
+    quat inv = q_conj(col->rot_t);
+    while (t < len) {
+        sl_vec3 q = v3_madd(from, dir, t);
+        float dist = sdf_local(&col->desc, q_rotate(inv, v3_sub(q, col->pos_t)), &n);
+        if (dist < r) { w->p[i] = q; return; }
+        t += fmaxf(dist - r, 0.5f * r);
+    }
+}
+
+static void collide_range(sl_world *w, int begin, int end, int chunk, void *ctx) {
+    (void)ctx; (void)chunk;
     float r = w->radius;
     for (int c = 0; c < w->collider_count; c++) {
         const collider *col = &w->colliders[c];
         const sl_collider_desc *d = &col->desc;
         int container = d->shape == SL_BOX && d->inside;
-        sl_vec3 pos = col->pos_t, pos0 = col->pos_t0;
-        quat rot = col->rot_t, rot0 = col->rot_t0;
-        quat inv = q_conj(rot);
+        int can_tunnel = !d->inside && d->shape != SL_PLANE;
+        quat inv = q_conj(col->rot_t);
+        float mu = d->friction;
 
-        for (int i = 0; i < w->count; i++) {
-            sl_vec3 local = q_rotate(inv, v3_sub(w->p[i], pos));
-            sl_vec3 surf_move = v3_sub(v3_add(pos, q_rotate(rot, local)), v3_add(pos0, q_rotate(rot0, local)));
+        for (int k = begin; k < end; k++) {
+            int i = w->active[k];
+            if (w->flags[i] & F_PINNED) continue;
+            if (can_tunnel) sweep(w, i, col);
+            sl_vec3 local = q_rotate(inv, v3_sub(w->p[i], col->pos_t));
+            sl_vec3 move = v3_sub(v3_add(col->pos_t, q_rotate(col->rot_t, local)),
+                                  v3_add(col->pos_t0, q_rotate(col->rot_t0, local)));
 
             /* Inside a box each wall is its own contact, so edges and corners hold too. */
             if (container) {
                 const float *lp = &local.x, *b = &d->half_extents.x;
                 for (int a = 0; a < 3; a++) {
-                    float lim = b[a] - r, pen = fabsf(lp[a]) - lim;
+                    float pen = fabsf(lp[a]) - (b[a] - r);
                     if (pen <= 0) continue;
                     sl_vec3 n = v3(0, 0, 0);
                     (&n.x)[a] = lp[a] > 0 ? -1.0f : 1.0f;
-                    contact(w, i, q_rotate(rot, n), pen, surf_move, d->friction);
+                    push_out(w, i, q_rotate(col->rot_t, n), pen, move, mu, c);
                 }
                 continue;
             }
@@ -148,8 +187,11 @@ void collide_particles(sl_world *w) {
             sl_vec3 n;
             float dist = sdf_local(d, local, &n);
             if (d->inside) { dist = -dist; n = v3_scale(n, -1.0f); }
-            float pen = r - dist;
-            if (pen > 0) contact(w, i, q_rotate(rot, n), pen, surf_move, d->friction);
+            if (r - dist > 0) push_out(w, i, q_rotate(col->rot_t, n), r - dist, move, mu, c);
         }
     }
+}
+
+void solve_colliders(sl_world *w) {
+    if (w->collider_count) sl__parallel(w, w->active_count, collide_range, NULL);
 }

@@ -2,149 +2,253 @@
 
 static float kernel_grad(float r, float h) { return r < h ? -3.0f * (h - r) * (h - r) : 0.0f; }
 
-static void predict(sl_world *w, float hs) {
-    sl_vec3 dv = v3_scale(w->gravity, hs);
-    for (int i = 0; i < w->count; i++) {
-        w->v[i] = v3_add(w->v[i], dv);
-        w->p[i] = v3_add(w->x[i], v3_scale(w->v[i], hs));
+static void predict(sl_world *w, int begin, int end, int chunk, void *ctx) {
+    (void)chunk; (void)ctx;
+    sl_vec3 dv = v3_scale(w->gravity, w->hs);
+    for (int k = begin; k < end; k++) {
+        int i = w->active[k];
+        if (!(w->flags[i] & F_PINNED)) w->v[i] = v3_add(w->v[i], dv);
+        w->p[i] = v3_madd(w->x[i], w->v[i], w->hs);
     }
 }
 
-static sl_vec3 pair_grad(const sl_world *w, const pair *pr, float inv_rest) {
-    if (pr->r >= w->h) return v3(0, 0, 0);
-    sl_vec3 d = v3_sub(w->p[pr->i], w->p[pr->j]);
-    return pr->r > 1e-9f ? v3_scale(d, kernel_grad(pr->r, w->h) * inv_rest / pr->r) : v3(0, 0, 0);
-}
-
-/* Position based fluids: push fluid particles apart wherever local density exceeds rest density. */
-static void solve_density(sl_world *w) {
-    float h = w->h, inv_rest = 1.0f / w->w_rest;
-    float eps = 0.05f / (w->spacing * w->spacing);
-    float self = kernel(0, h);
-
-    for (int i = 0; i < w->count; i++) {
-        w->grad2[i] = 0;
-        if (w->fluid[i]) {
-            w->rho[i] = self + wall_density(w, i, &w->wall_grad[i]);
-            w->grad[i] = v3_scale(w->wall_grad[i], inv_rest);
-        } else {
-            w->rho[i] = self;
-            w->grad[i] = w->wall_grad[i] = v3(0, 0, 0);
+/* Position based fluids: lambda is how hard each fluid particle pushes to get back to rest density. */
+static void fluid_lambda(sl_world *w, int begin, int end, int chunk, void *ctx) {
+    (void)chunk; (void)ctx;
+    float h = w->h, h2 = h * h, inv_rest = 1.0f / w->w_rest, eps = 0.2f / (w->spacing * w->spacing);
+    for (int k = begin; k < end; k++) {
+        int i = w->active[k];
+        w->lambda[i] = 0;
+        if (!(w->flags[i] & F_FLUID)) continue;
+        sl_vec3 grad_i, pi = w->p[i];
+        float rho = kernel(0, h) + wall_density(w, i, &grad_i, 0), grad2 = 0;
+        grad_i = v3_scale(grad_i, inv_rest);
+        for (int n = w->nbr_off[i]; n < w->nbr_off[i + 1]; n++) {
+            int j = w->nbr[n];
+            sl_vec3 d = v3_sub(pi, w->p[j]);
+            float r2 = v3_len2(d);
+            if (r2 >= h2) { w->nbr_r[n] = h; continue; }
+            float r = sqrtf(r2);
+            w->nbr_r[n] = r;
+            rho += kernel(r, h);
+            if (r < 1e-9f) continue;
+            sl_vec3 g = v3_scale(d, kernel_grad(r, h) * inv_rest / r);
+            grad_i = v3_add(grad_i, g);
+            if (w->flags[j] & F_FLUID) grad2 += v3_len2(g);
         }
+        float c = rho * inv_rest - 1.0f;
+        if (c > 0) w->lambda[i] = -c / (grad2 + v3_len2(grad_i) + eps);
     }
-    for (int k = 0; k < w->pair_count; k++) {
-        pair *pr = &w->pairs[k];
-        int i = pr->i, j = pr->j;
-        float r2 = v3_len2(v3_sub(w->p[i], w->p[j]));
-        pr->r = r2 < h * h ? sqrtf(r2) : h;
-        if (pr->r >= h) continue;
-        float wk = kernel(pr->r, h);
-        w->rho[i] += wk;
-        w->rho[j] += wk;
-        sl_vec3 g = pair_grad(w, pr, inv_rest);
-        float g2 = v3_len2(g);
-        w->grad[i] = v3_add(w->grad[i], g);
-        w->grad[j] = v3_sub(w->grad[j], g);
-        if (w->fluid[j]) w->grad2[i] += g2;
-        if (w->fluid[i]) w->grad2[j] += g2;
-    }
-    for (int i = 0; i < w->count; i++) {
-        float c = w->rho[i] * inv_rest - 1.0f;
-        w->lambda[i] = w->fluid[i] && c > 0 ? -c / (w->grad2[i] + v3_len2(w->grad[i]) + eps) : 0.0f;
-        w->delta[i] = v3_scale(w->wall_grad[i], w->lambda[i] * inv_rest);
-    }
-    for (int k = 0; k < w->pair_count; k++) {
-        const pair *pr = &w->pairs[k];
-        int i = pr->i, j = pr->j;
-        if (pr->r >= h || (!w->fluid[i] && !w->fluid[j])) continue;
-        sl_vec3 g = pair_grad(w, pr, inv_rest);
-        float li = w->fluid[i] ? w->lambda[i] : 0.0f, lj = w->fluid[j] ? w->lambda[j] : 0.0f;
-        if (w->fluid[i]) w->delta[i] = v3_add(w->delta[i], v3_scale(g, li + lj));
-        if (w->fluid[j]) w->delta[j] = v3_sub(w->delta[j], v3_scale(g, li + lj));
-    }
-    for (int i = 0; i < w->count; i++) w->p[i] = v3_add(w->p[i], w->delta[i]);
 }
 
-/* Non-penetration and friction for any pair that involves a grain. */
-static void solve_contacts(sl_world *w) {
-    float d0 = w->spacing, d02 = d0 * d0;
-    for (int k = 0; k < w->contact_count; k++) {
-        int i = w->contacts[k].i, j = w->contacts[k].j;
+/* Pressure push from lambda, plus a minimum spacing so two fluid particles never collapse onto one spot.
+   Solids get the opposite of the push their fluid neighbors take from them, which is buoyancy. */
+static void fluid_delta(sl_world *w, int begin, int end, int chunk, void *ctx) {
+    (void)ctx; (void)chunk;
+    float h = w->h, h2 = h * h, inv_rest = 1.0f / w->w_rest;
+    float near = 0.5f * w->spacing, limit = 0.5f * w->spacing;
+    for (int k = begin; k < end; k++) {
+        int i = w->active[k];
+        w->delta[i] = v3(0, 0, 0);
+        sl_vec3 dp = v3(0, 0, 0), pi = w->p[i];
+        if (!(w->flags[i] & F_FLUID)) {
+            if (w->flags[i] & F_PINNED) continue;
+            for (int n = w->nbr_off[i]; n < w->nbr_off[i + 1]; n++) {
+                int j = w->nbr[n];
+                if (!(w->flags[j] & F_FLUID) || w->lambda[j] == 0) continue;
+                sl_vec3 d = v3_sub(pi, w->p[j]);
+                float r2 = v3_len2(d);
+                if (r2 >= h2 || r2 < 1e-18f) continue;
+                float r = sqrtf(r2);
+                dp = v3_madd(dp, d, w->mass[j] / w->mass[i] * w->lambda[j] * kernel_grad(r, h) * inv_rest / r);
+            }
+        } else {
+            float li = w->lambda[i];
+            if (li != 0) {
+                sl_vec3 wall;
+                wall_density(w, i, &wall, li * inv_rest * w->mass[i] / w->hs);
+                dp = v3_scale(wall, li * inv_rest);
+            }
+            for (int n = w->nbr_off[i]; n < w->nbr_off[i + 1]; n++) {
+                int j = w->nbr[n];
+                float r = w->nbr_r[n];
+                if (r >= h || r < 1e-9f || (!(w->flags[j] & F_FLUID) && li == 0)) continue;
+                sl_vec3 d = v3_sub(pi, w->p[j]);
+                float l = li + ((w->flags[j] & F_FLUID) ? w->lambda[j] : 0.0f);
+                dp = v3_madd(dp, d, l * kernel_grad(r, h) * inv_rest / r);
+                if (r < near && (w->flags[j] & F_FLUID)) dp = v3_madd(dp, d, 0.5f * (near - r) / r);
+            }
+        }
+        float len = v3_len(dp);
+        w->delta[i] = len > limit ? v3_scale(dp, limit / len) : dp;
+    }
+}
+
+static void apply_delta(sl_world *w, int begin, int end, int chunk, void *ctx) {
+    (void)chunk; (void)ctx;
+    for (int k = begin; k < end; k++) {
+        int i = w->active[k];
+        if (!(w->flags[i] & F_PINNED)) w->p[i] = v3_add(w->p[i], w->delta[i]);
+    }
+}
+
+/* Non-penetration and friction for pairs that involve a grain or a solid; one color at a time. */
+static void solve_contact_range(sl_world *w, int begin, int end, int chunk, void *ctx) {
+    (void)chunk;
+    int base = *(int *)ctx;
+    float d0 = w->spacing;
+    for (int k = base + begin; k < base + end; k++) {
+        const contact *c = &w->contacts[k];
+        int i = c->i, j = c->j;
+        if (!(w->flags[i] & F_AWAKE)) continue;
+        float dist = d0, mu = 0.5f * (w->materials[w->mat[i]].friction + w->materials[w->mat[j]].friction);
+        if (w->obj[i] >= 0 && w->obj[i] == w->obj[j]) {
+            dist = w->objects[w->obj[i]].self_dist;
+            if (w->objects[w->obj[i]].kind == OBJ_SOFT) mu = 0;
+        }
+        /* Fluid against solids: no friction, and a little closer, so water can flow between grains. */
+        if ((w->flags[i] | w->flags[j]) & F_FLUID) { mu = 0; dist = 0.8f * d0; }
         sl_vec3 d = v3_sub(w->p[i], w->p[j]);
         float r2 = v3_len2(d);
-        if (r2 >= d02 || r2 < 1e-18f) continue;
-        float r = sqrtf(r2);
-
+        if (r2 >= dist * dist || r2 < 1e-18f) continue;
+        float wi = w->inv_mass[i] * c->lift, wj = w->inv_mass[j], ws = wi + wj;
+        if (ws <= 0) continue;
+        float r = sqrtf(r2), pen = dist - r;
         sl_vec3 n = v3_scale(d, 1.0f / r);
-        w->touch[i] = w->touch[j] = 1;
-        float wi = w->inv_mass[i] * w->contacts[k].r, wj = w->inv_mass[j], ws = wi + wj;
-        float pen = d0 - r;
-        w->p[i] = v3_add(w->p[i], v3_scale(n, pen * wi / ws));
-        w->p[j] = v3_sub(w->p[j], v3_scale(n, pen * wj / ws));
+        w->flags[i] |= F_TOUCH | (w->flags[j] & F_FLUID ? F_WET : 0);
+        w->flags[j] |= F_TOUCH | (w->flags[i] & F_FLUID ? F_WET : 0);
+        w->p[i] = v3_madd(w->p[i], n, pen * wi / ws);
+        w->p[j] = v3_madd(w->p[j], n, -pen * wj / ws);
 
-        float mu = 0.5f * (w->materials[w->mat[i]].friction + w->materials[w->mat[j]].friction);
         sl_vec3 rel = v3_sub(v3_sub(w->p[i], w->x[i]), v3_sub(w->p[j], w->x[j]));
         sl_vec3 tan = v3_sub(rel, v3_scale(n, v3_dot(rel, n)));
         float tl = v3_len(tan);
         if (tl <= 1e-9f) continue;
         float f = tl < mu * pen ? 1.0f : fminf(mu * pen / tl, 1.0f);
-        sl_vec3 corr = v3_scale(tan, f);
-        w->p[i] = v3_sub(w->p[i], v3_scale(corr, wi / ws));
-        w->p[j] = v3_add(w->p[j], v3_scale(corr, wj / ws));
+        w->p[i] = v3_madd(w->p[i], tan, -f * wi / ws);
+        w->p[j] = v3_madd(w->p[j], tan, f * wj / ws);
     }
 }
 
-static void update_velocities(sl_world *w, float hs) {
-    float vmax = w->spacing / hs, inv = 1.0f / hs;
-    for (int i = 0; i < w->count; i++) {
+static void solve_contacts(sl_world *w) {
+    for (int color = 0; color <= SL_MAX_COLORS; color++) {
+        int base = w->color_off[color], count = w->color_off[color + 1] - base;
+        if (count <= 0) continue;
+        /* The overflow color has shared particles, so it runs on one thread. */
+        if (color == SL_MAX_COLORS || count < SL_CHUNK) solve_contact_range(w, 0, count, 0, &base);
+        else sl__parallel(w, count, solve_contact_range, &base);
+    }
+}
+
+static void update_velocities(sl_world *w, int begin, int end, int chunk, void *ctx) {
+    (void)chunk; (void)ctx;
+    float vmax = w->spacing / w->hs, inv = 1.0f / w->hs;
+    for (int k = begin; k < end; k++) {
+        int i = w->active[k];
         sl_vec3 v = v3_scale(v3_sub(w->p[i], w->x[i]), inv);
-        float s = v3_len(v);
-        if (s > vmax) v = v3_scale(v, vmax / s);
+        float s2 = v3_len2(v);
+        if (s2 > vmax * vmax) v = v3_scale(v, vmax / sqrtf(s2));
+        if (w->flags[i] & F_PINNED) v = v3(0, 0, 0);
+        float damping = w->materials[w->mat[i]].damping;
+        if (damping > 0) v = v3_scale(v, 1.0f / (1.0f + damping * w->hs));
         w->v[i] = v;
         w->x[i] = w->p[i];
     }
 }
 
-/* XSPH viscosity and cohesion, both only between fluid particles. */
-static void fluid_velocity(sl_world *w, float hs) {
-    int visc = 0, cohesion = 0;
-    for (int m = 0; m < w->material_count; m++) {
-        if (w->materials[m].kind != SL_FLUID) continue;
-        visc |= w->materials[m].viscosity > 0;
-        cohesion |= w->materials[m].cohesion > 0;
+/* Vorticity of each fluid particle, kept in tmp for the force pass. */
+static void fluid_curl(sl_world *w, int begin, int end, int chunk, void *ctx) {
+    (void)chunk; (void)ctx;
+    float h = w->h, h2 = h * h, inv_rest = 1.0f / w->w_rest;
+    for (int k = begin; k < end; k++) {
+        int i = w->active[k];
+        sl_vec3 curl = v3(0, 0, 0);
+        if ((w->flags[i] & F_FLUID) && w->materials[w->mat[i]].vorticity > 0)
+            for (int n = w->nbr_off[i]; n < w->nbr_off[i + 1]; n++) {
+                int j = w->nbr[n];
+                if (!(w->flags[j] & F_FLUID)) continue;
+                sl_vec3 d = v3_sub(w->x[i], w->x[j]);
+                float r2 = v3_len2(d);
+                if (r2 >= h2 || r2 < 1e-18f) continue;
+                float r = sqrtf(r2);
+                curl = v3_add(curl, v3_cross(v3_sub(w->v[j], w->v[i]), v3_scale(d, kernel_grad(r, h) * inv_rest / r)));
+            }
+        w->tmp[i] = curl;
     }
-    if (!visc && !cohesion) return;
-
-    float h = w->h, d0 = w->spacing, inv_rest = 1.0f / w->w_rest;
-    float band = (h - d0) * 0.5f;
-    for (int i = 0; i < w->count; i++) w->delta[i] = w->v[i];
-    for (int k = 0; k < w->pair_count; k++) {
-        int i = w->pairs[k].i, j = w->pairs[k].j;
-        if (w->pairs[k].r >= h || !w->fluid[i] || !w->fluid[j]) continue;
-        const sl_material_desc *mi = &w->materials[w->mat[i]], *mj = &w->materials[w->mat[j]];
-        sl_vec3 dv = v3_scale(v3_sub(w->v[j], w->v[i]), kernel(w->pairs[k].r, h) * inv_rest);
-        w->delta[i] = v3_add(w->delta[i], v3_scale(dv, mi->viscosity));
-        w->delta[j] = v3_sub(w->delta[j], v3_scale(dv, mj->viscosity));
-
-        if (!cohesion) continue;
-        sl_vec3 d = v3_sub(w->x[j], w->x[i]);
-        float r = v3_len(d);
-        if (r <= d0 || r >= h) continue;
-        sl_vec3 pull = v3_scale(d, hs * (r - d0) * (h - r) / (band * band * r));
-        w->delta[i] = v3_add(w->delta[i], v3_scale(pull, mi->cohesion));
-        w->delta[j] = v3_sub(w->delta[j], v3_scale(pull, mj->cohesion));
-    }
-    for (int i = 0; i < w->count; i++) w->v[i] = w->delta[i];
 }
 
-void solve_substep(sl_world *w, float hs, float t) {
-    predict(w, hs);
-    collider_frames(w, t);
-    solve_density(w);
-    for (int k = 0; k < w->iterations; k++) {
-        solve_contacts(w);
-        collide_particles(w);
+/* XSPH viscosity, vorticity confinement and cohesion between fluid particles, once per step. */
+static void fluid_velocity(sl_world *w, int begin, int end, int chunk, void *ctx) {
+    (void)chunk; (void)ctx;
+    float h = w->h, h2 = h * h, d0 = w->spacing, inv_rest = 1.0f / w->w_rest, band = (h - d0) * 0.5f;
+    float dt = w->dt;
+    for (int k = begin; k < end; k++) {
+        int i = w->active[k];
+        w->delta[i] = w->v[i];
+        if (!(w->flags[i] & F_FLUID)) continue;
+        const sl_material_desc *m = &w->materials[w->mat[i]];
+        sl_vec3 visc = v3(0, 0, 0), pull = v3(0, 0, 0), eta = v3(0, 0, 0);
+        int vort = m->vorticity > 0, coh = m->cohesion > 0;
+        float wi = vort ? v3_len(w->tmp[i]) : 0;
+        for (int n = w->nbr_off[i]; n < w->nbr_off[i + 1]; n++) {
+            int j = w->nbr[n];
+            if (!(w->flags[j] & F_FLUID)) continue;
+            sl_vec3 d = v3_sub(w->x[j], w->x[i]);
+            float r2 = v3_len2(d);
+            if (r2 >= h2) continue;
+            float r = sqrtf(r2);
+            visc = v3_madd(visc, v3_sub(w->v[j], w->v[i]), kernel(r, h) * inv_rest);
+            if (vort && r > 1e-9f) eta = v3_madd(eta, d, -(v3_len(w->tmp[j]) - wi) * kernel_grad(r, h) * inv_rest / r);
+            if (coh && r > d0) pull = v3_madd(pull, d, (r - d0) * (h - r) / (band * band * r));
+        }
+        float visc_step = 1.0f - powf(1.0f - fminf(m->viscosity, 1.0f), (float)w->substeps);
+        sl_vec3 v = v3_madd(w->v[i], visc, visc_step);
+        v = v3_madd(v, pull, m->cohesion * dt);
+        float el = v3_len(eta);
+        if (m->vorticity > 0 && el > 1e-9f)
+            v = v3_madd(v, v3_cross(v3_scale(eta, 1.0f / el), w->tmp[i]), m->vorticity * dt);
+        w->delta[i] = v;
     }
-    update_velocities(w, hs);
-    fluid_velocity(w, hs);
+}
+
+static void copy_velocity(sl_world *w, int begin, int end, int chunk, void *ctx) {
+    (void)chunk; (void)ctx;
+    for (int k = begin; k < end; k++) w->v[w->active[k]] = w->delta[w->active[k]];
+}
+
+void solve_substep(sl_world *w, float t) {
+    int n = w->active_count;
+    collider_frames(w, t);
+    sl__parallel(w, n, predict, NULL);
+
+    int fluids = 0;
+    for (int m = 0; m < w->material_count; m++) fluids |= w->materials[m].kind == SL_FLUID;
+    objects_substep(w);
+    for (int it = 0; fluids && it < w->fluid_iterations; it++) {
+        sl__parallel(w, n, fluid_lambda, NULL);
+        sl__parallel(w, n, fluid_delta, NULL);
+        sl__parallel(w, n, apply_delta, NULL);
+    }
+    /* Without grain contacts or objects there is nothing to iterate, so colliders need a single pass. */
+    int passes = w->contact_count || w->dist_count || w->cluster_count ? w->iterations : 1;
+    for (int k = 0; k < passes; k++) {
+        solve_contacts(w);
+        objects_solve(w);
+        solve_colliders(w);
+    }
+    sl__parallel(w, n, update_velocities, NULL);
+}
+
+void fluid_step(sl_world *w) {
+    int extras = 0, vort = 0, n = w->active_count;
+    for (int m = 0; m < w->material_count; m++) {
+        const sl_material_desc *md = &w->materials[m];
+        if (md->kind != SL_FLUID) continue;
+        extras |= md->viscosity > 0 || md->cohesion > 0 || md->vorticity > 0;
+        vort |= md->vorticity > 0;
+    }
+    if (!extras) return;
+    if (vort) sl__parallel(w, n, fluid_curl, NULL);
+    sl__parallel(w, n, fluid_velocity, NULL);
+    sl__parallel(w, n, copy_velocity, NULL);
 }
