@@ -703,6 +703,117 @@ static void test_allocator(void) {
     CHECK(live_allocs == 0, "%d allocations leaked", live_allocs);
 }
 
+/* A grab must die with its particle, or a new particle that reuses the id gets dragged. */
+static void test_grab_dies_with_particle(void) {
+    sl_world *w = make_world(200);
+    sl_material m = sand(w), s = solid(w);
+    sl_particle a = sl_spawn(w, m, (sl_vec3){0, 1, 0}, (sl_vec3){0, 0, 0});
+    sl_grab_begin(w, a);
+    sl_remove(w, a);
+    sl_particle b = sl_spawn(w, m, (sl_vec3){3, 1, 0}, (sl_vec3){0, 0, 0});
+    CHECK(b == a, "id was not reused, test does not apply");
+    sl_grab_move(w, a, (sl_vec3){3, 5, 0});
+    steps(w, 2);
+    CHECK(sl_position(w, b).y < 1.0f, "new particle was dragged by an old grab: y %f", sl_position(w, b).y);
+
+    sl_object rope = sl_rope_create(w, s, (sl_vec3){-1, 2, 0}, (sl_vec3){1, 2, 0}, 0);
+    const sl_particle *ids;
+    int n = sl_object_particles(w, rope, &ids);
+    sl_particle end = ids[n - 1];
+    sl_grab_begin(w, end);
+    sl_object_destroy(w, rope);
+    int reused = 0;
+    for (int k = 0; k < n; k++) reused |= sl_spawn(w, m, (sl_vec3){-3 + 0.2f * (float)k, 1, 2}, (sl_vec3){0, 0, 0}) == end;
+    CHECK(reused, "rope id was not reused, test does not apply");
+    sl_grab_move(w, end, (sl_vec3){0, 6, 0});
+    steps(w, 2);
+    CHECK(sl_position(w, end).y < 1.0f, "particle reusing a rope id was dragged: y %f", sl_position(w, end).y);
+    sl_world_destroy(w);
+}
+
+/* A fast particle resting on a ball must keep sliding, not be put back where it started. */
+static void test_fast_slide_on_ball(void) {
+    sl_world *w = make_world(4);
+    sl_collider_desc ball = {0};
+    ball.shape = SL_SPHERE;
+    ball.radius = 2.0f;
+    sl_collider_add(w, &ball);
+    sl_particle p = sl_spawn(w, sand(w), (sl_vec3){0, 2.0f + 0.9f * R, 0}, (sl_vec3){20, 0, 0});
+    sl_step(w, DT);
+    CHECK(sl_position(w, p).x > 0.15f, "particle stuck on the ball: moved %f", sl_position(w, p).x);
+    sl_world_destroy(w);
+}
+
+/* Sleeping water keeps its surface shape on the right particle when memory is reordered. */
+static void test_anisotropy_after_reorder(void) {
+    sl_world_desc d = {0};
+    d.max_particles = 4000;
+    d.particle_radius = R;
+    d.gravity = (sl_vec3){0, -9.81f, 0};
+    d.anisotropy = 1;
+    sl_world *w = sl_world_create(&d);
+    add_container(w, (sl_vec3){0.4f, 1.0f, 0.4f});
+    sl_spawn_box(w, water(w), (sl_vec3){-0.4f, -1.0f, -0.4f}, (sl_vec3){0.4f, -0.7f, 0.4f});
+    sl_stats st;
+    for (int i = 0; i < 600; i++) { sl_step(w, DT); sl_get_stats(w, &st); if (!st.awake) break; }
+    CHECK(st.awake == 0, "pool never slept");
+    sl_material m = sand(w);
+    for (int k = 0; k < 50; k++) sl_spawn(w, m, (sl_vec3){0.3f * (float)(k % 5) - 0.6f, 0.5f, 0.1f * (float)(k / 5) - 0.3f}, (sl_vec3){0, 0, 0});
+    steps(w, 3);
+    const sl_vec3 *a = sl_anisotropy(w), *p = sl_positions(w);
+    float worst = 0;
+    for (int s = 0; s < sl_count(w); s++) worst = fmaxf(worst, dist(a[4 * s], p[s]));
+    CHECK(worst < 2 * R, "ellipsoid left its particle by %f", worst);
+    sl_world_destroy(w);
+}
+
+static void sand_scene(sl_world *w, sl_material m) {
+    add_floor(w, 0.5f);
+    sl_spawn_box(w, m, (sl_vec3){-0.3f, 0.2f, -0.3f}, (sl_vec3){0.3f, 0.6f, 0.3f});
+}
+
+/* After sl_clear a world must behave exactly like a new one. */
+static void test_clear_is_fresh(void) {
+    sl_world *a = make_world(4000), *b = make_world(4000);
+    sl_material sa = sand(a), ca = solid(a);
+    sl_material sb = sand(b);
+    solid(b);
+    sl_object cloth = sl_cloth_create(a, ca, (sl_vec3){-0.5f, 1, -0.5f}, (sl_vec3){1, 0, 0}, (sl_vec3){0, 0, 1}, 0, 0.01f);
+    CHECK(cloth >= 0, "cloth not made");
+    steps(a, 20);
+    sl_clear(a);
+    sl_stats st;
+    sl_get_stats(a, &st);
+    CHECK(st.particles == 0 && st.awake == 0 && st.contacts == 0 && st.pairs == 0, "stats not reset: %d awake, %d contacts", st.awake, st.contacts);
+    sand_scene(a, sa);
+    sand_scene(b, sb);
+    steps(a, 60);
+    steps(b, 60);
+    float worst = 0;
+    for (int k = 0; k < sl_count(a); k++) worst = fmaxf(worst, dist(sl_position(a, k), sl_position(b, k)));
+    CHECK(sl_count(a) == sl_count(b) && worst == 0, "cleared world differs from a new one by %f", worst);
+    sl_world_destroy(a);
+    sl_world_destroy(b);
+}
+
+static void test_removed_collider(void) {
+    sl_world *w = make_world(2000);
+    sl_collider_desc box = {0};
+    box.shape = SL_BOX;
+    box.half_extents = (sl_vec3){0.5f, 0.1f, 0.5f};
+    sl_collider c = sl_collider_add(w, &box);
+    sl_spawn_box(w, sand(w), (sl_vec3){-0.3f, 0.1f, -0.3f}, (sl_vec3){0.3f, 0.3f, 0.3f});
+    steps(w, 30);
+    CHECK(sl_collider_force(w, c).y < 0, "no load on the box");
+    sl_collider_remove(w, c);
+    sl_collider_move(w, c, (sl_vec3){0, 5, 0}, NULL);
+    sl_vec3 f = sl_collider_force(w, c);
+    CHECK(f.x == 0 && f.y == 0 && f.z == 0, "removed collider still reports force %f", f.y);
+    steps(w, 10);
+    CHECK(max_height(w) < 0.3f, "sand still held by a removed box");
+    sl_world_destroy(w);
+}
+
 typedef struct { const char *name; void (*fn)(void); } test;
 
 int main(int argc, char **argv) {
@@ -737,6 +848,11 @@ int main(int argc, char **argv) {
         {"wet sand", test_wet_sand},
         {"limits", test_limits},
         {"allocator", test_allocator},
+        {"grab dies with particle", test_grab_dies_with_particle},
+        {"fast slide on ball", test_fast_slide_on_ball},
+        {"anisotropy after reorder", test_anisotropy_after_reorder},
+        {"clear is fresh", test_clear_is_fresh},
+        {"removed collider", test_removed_collider},
     };
     for (size_t i = 0; i < sizeof tests / sizeof tests[0]; i++) {
         if (argc > 1 && !strstr(tests[i].name, argv[1])) continue;

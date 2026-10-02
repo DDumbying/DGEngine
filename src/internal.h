@@ -25,12 +25,13 @@ typedef struct {
 
 typedef struct { sl_particle id; sl_vec3 from, to; } grab;
 
-typedef struct { int i, j; float lift; int color; } contact;   /* lift: shock propagation factor */
+/* lift: shock propagation factor; mu, dist and glue only change on a rebuild, so they are kept here. */
+typedef struct { int i, j; float lift, mu, dist, glue; } contact;
 typedef struct { int a, b; float rest, compliance; int obj; } dist_con;
 typedef struct { int slot, cluster; sl_vec3 rest; } member;
 typedef struct {
     int first, count, obj;
-    float stiffness, plasticity;
+    float stiffness, plasticity, pull;   /* pull: share of the way to the goal per pass */
     quat rot;
     sl_vec3 center;
 } cluster;
@@ -67,9 +68,10 @@ struct sl_world {
     sl_vec3 *x, *p, *v, *x_step, *x_build, *delta, *tmp;
     sl_vec3 *push;               /* per slot, 2 entries: impulse given to colliders last awake step */
     float *lambda, *inv_mass, *mass;
-    unsigned char *flags, *calm, *mat, *wet, *near_fluid, *push_id;   /* push_id: 2 per slot, collider + 1 or 0 */
+    unsigned char *flags, *calm, *mat, *wet, *near_fluid, *mark, *push_id;   /* push_id: 2 per slot, collider + 1 or 0 */
     sl_vec3 *aniso;              /* 4 per slot when enabled: center, then three axes */
     int *id, *obj, *island, *order;
+    sl_material *material;       /* mat widened to the public type, so sl_materials can hand it out */
 
     /* stable ids */
     int *id_slot, *free_ids, free_count, next_id;
@@ -89,12 +91,15 @@ struct sl_world {
     int *active, active_count;
     int *island_calm, island_count, island_cap;
     int need_rebuild, rebuilds, built;   /* built: particle count when neighbor lists were made */
+    int nbr_valid;                       /* neighbor lists still match the current slots */
+    unsigned char *colors;               /* graph coloring scratch */
+    int color_cap, *chunk_buf, chunk_cap;
 
     object *objects;
     int object_count, object_cap;
-    dist_con *dist;
+    dist_con *dist, *dist_tmp;
     float *dist_lambda;
-    int dist_count, dist_cap, dist_lambda_cap, dist_color_off[SL_MAX_COLORS + 2];
+    int dist_count, dist_cap, dist_tmp_cap, dist_lambda_cap, dist_color_off[SL_MAX_COLORS + 2];
     cluster *clusters;
     int cluster_count, cluster_cap;
     member *members;
@@ -130,11 +135,18 @@ void pool_wake(sl_pool *p);
 void pool_sleep(sl_pool *p);
 void pool_run(sl_pool *p, sl_task_fn *task, int count, void *ctx);
 
+static inline float kernel(float r, float h) { return r < h ? (h - r) * (h - r) * (h - r) : 0.0f; }
+static inline float kernel_grad(float r, float h) { return r < h ? -3.0f * (h - r) * (h - r) : 0.0f; }
+
+int slot_of(const sl_world *w, sl_particle p);
+float bound_radius(const sl_collider_desc *d);
+int remove_doomed(sl_world *w, const sl_vec3 *center, float radius);
+int color_graph(sl_world *w, const int *ends, int stride, int count, int *offsets);
+void run_colors(sl_world *w, const int *offsets, sl_range_fn fn);
+
 /* grid and neighbors */
-float kernel(float r, float h);
 int grid_rebuild(sl_world *w, int move);   /* move: also reorder particles in memory */
 void update_islands(sl_world *w);
-void sl__remove_object_particles(sl_world *w, int obj);
 
 /* solver passes */
 void collider_frames(sl_world *w, float t);
@@ -154,6 +166,8 @@ void objects_substep(sl_world *w);
 void objects_solve(sl_world *w);
 void objects_plasticity(sl_world *w);
 void objects_remap(sl_world *w, const int *old_to_new);
+void objects_drop(sl_world *w, int obj);
+void color_dist(sl_world *w);
 int objects_membership(sl_world *w);
 
 #endif

@@ -306,7 +306,12 @@ typedef struct {
 static const char *SCENE_NAMES[] = {"sandbox", "water and sand", "rope bridge", "curtain", "slime"};
 
 static void keep(sim *s, sl_object o, int kind) {
-    if (o < 0 || s->object_count >= MAX_OBJECTS) return;
+    if (o < 0) return;
+    int n = 0;
+    for (int k = 0; k < s->object_count; k++)
+        if (sl_object_particles(s->world, s->objects[k], NULL)) { s->objects[n] = s->objects[k]; s->kinds[n++] = s->kinds[k]; }
+    s->object_count = n;
+    if (s->object_count >= MAX_OBJECTS) return;
     s->objects[s->object_count] = o;
     s->kinds[s->object_count++] = kind;
 }
@@ -480,6 +485,18 @@ static Vector3 drag_point(Ray ray, Vector3 on, Vector3 facing) {
     return Vector3Add(ray.position, Vector3Scale(ray.direction, t));
 }
 
+/* Lets go of whatever the current tool holds, before switching tools or loading a scene. */
+static void drop_tools(sim *s, tools *t) {
+    if (t->grabbing) sl_grab_end(s->world, t->grabbed);
+    t->grabbing = t->moving_shape = t->rope_started = 0;
+    sl_collider_set_enabled(s->world, s->push, 0);
+}
+
+static void set_tool(sim *s, tools *t, int tool) {
+    if (t->tool != tool) drop_tools(s, t);
+    t->tool = tool;
+}
+
 static void use_tools(sim *s, tools *t, Camera3D cam, Ray ray, int pressed, int down, int released) {
     pick pk = pick_ray(s, ray);
     t->has_point = pk.hit;
@@ -554,8 +571,8 @@ static void use_tools(sim *s, tools *t, Camera3D cam, Ray ray, int pressed, int 
                 pin_index(s, r, sl_object_particles(s->world, r, NULL) - 1);
                 keep(s, r, K_ROPE);
             }
-            t->rope_started = 0;
         }
+        if (released) t->rope_started = 0;
         break;
     case T_BOX:
     case T_BALL:
@@ -575,8 +592,20 @@ typedef struct {
     Material sphere_mat, depth_mat, thick_mat, speck_mat;
     Mesh grain, quad;
     Matrix *xf;
-    int loc[40];
+    int xf_cap, loc[40];
 } renderer;
+
+/* The instance buffer grows with the scene instead of being sized for the worst case. */
+static int xf_room(renderer *r, int n) {
+    if (n <= r->xf_cap) return 1;
+    int cap = r->xf_cap ? r->xf_cap : 4096;
+    while (cap < n) cap *= 2;
+    Matrix *m = realloc(r->xf, sizeof(Matrix) * (size_t)cap);
+    if (!m) return 0;
+    r->xf = m;
+    r->xf_cap = cap;
+    return 1;
+}
 
 enum { L_SKY_RES, L_SKY_PS, L_SKY_INV, L_D_VIEW, L_D_PROJ, L_T_VIEW, L_T_PROJ, L_K_VIEW, L_K_PROJ,
        L_B_SRC, L_B_RES, L_B_DIR, L_B_FILTER, L_B_RANGE,
@@ -619,7 +648,8 @@ static void renderer_init(renderer *r) {
     r->speck_mat = instanced_material(r->speck);
     r->grain = GenMeshSphere(1.0f, 4, 6);
     r->quad = quad_mesh();
-    r->xf = malloc(sizeof(Matrix) * (size_t)(MAX_PARTICLES * 5 > MAX_DIFFUSE ? MAX_PARTICLES * 5 : MAX_DIFFUSE));
+    r->xf = NULL;
+    r->xf_cap = 0;
     struct { Shader *sh; const char *name; } locs[L_COUNT] = {
         {&r->sky, "uRes"}, {&r->sky, "uProjScale"}, {&r->sky, "uInvView"}, {&r->depth, "uView"}, {&r->depth, "uProj"},
         {&r->thick, "uView"}, {&r->thick, "uProj"}, {&r->speck, "uView"}, {&r->speck, "uProj"},
@@ -679,22 +709,29 @@ static void draw_sand(renderer *r, const sim *s) {
     const sl_material *m = sl_materials(s->world);
     const sl_particle *ids = sl_ids(s->world);
     const unsigned char *wetness = sl_wetness(s->world);
-    for (int bucket = 0; bucket < 8; bucket++) {
-        int n = 0;
-        for (int i = 0; i < sl_count(s->world); i++) {
-            if (m[i] != s->sand) continue;
-            unsigned h = hash_id((unsigned)ids[i]);
-            int b = (int)(h & 3) + (wetness[i] > 90 ? 4 : 0);
-            if (b != bucket) continue;
-            for (int g = 0; g < 5; g++) {
-                unsigned q = hash_id(h + (unsigned)g * 7919u);
-                float ox = ((float)(q & 255) / 255.0f - 0.5f) * RADIUS * 1.5f, oy = ((float)((q >> 8) & 255) / 255.0f - 0.5f) * RADIUS * 1.5f;
-                float oz = ((float)((q >> 16) & 255) / 255.0f - 0.5f) * RADIUS * 1.5f, size = RADIUS * (0.38f + 0.2f * (float)(q >> 24) / 255.0f);
-                r->xf[n++] = MatrixMultiply(MatrixScale(size, size, size), MatrixTranslate(p[i].x + ox, p[i].y + oy, p[i].z + oz));
-            }
+    /* Count per color first, so one pass can drop every grain straight into its color's range. */
+    int start[9] = {0}, fill[8], total;
+    for (int i = 0; i < sl_count(s->world); i++)
+        if (m[i] == s->sand) start[1 + (hash_id((unsigned)ids[i]) & 3) + (wetness[i] > 90 ? 4 : 0)] += 5;
+    for (int b = 0; b < 8; b++) start[b + 1] += start[b];
+    total = start[8];
+    if (!total || !xf_room(r, total)) return;
+    memcpy(fill, start, sizeof fill);
+    for (int i = 0; i < sl_count(s->world); i++) {
+        if (m[i] != s->sand) continue;
+        unsigned h = hash_id((unsigned)ids[i]);
+        int b = (int)(h & 3) + (wetness[i] > 90 ? 4 : 0);
+        for (int g = 0; g < 5; g++) {
+            unsigned q = hash_id(h + (unsigned)g * 7919u);
+            float ox = ((float)(q & 255) / 255.0f - 0.5f) * RADIUS * 1.5f, oy = ((float)((q >> 8) & 255) / 255.0f - 0.5f) * RADIUS * 1.5f;
+            float oz = ((float)((q >> 16) & 255) / 255.0f - 0.5f) * RADIUS * 1.5f, size = RADIUS * (0.38f + 0.2f * (float)(q >> 24) / 255.0f);
+            r->xf[fill[b]++] = MatrixMultiply(MatrixScale(size, size, size), MatrixTranslate(p[i].x + ox, p[i].y + oy, p[i].z + oz));
         }
-        r->sphere_mat.maps[MATERIAL_MAP_DIFFUSE].color = bucket < 4 ? dry[bucket] : wet[bucket - 4];
-        if (n) DrawMeshInstanced(r->grain, r->sphere_mat, r->xf, n);
+    }
+    for (int b = 0; b < 8; b++) {
+        if (start[b + 1] == start[b]) continue;
+        r->sphere_mat.maps[MATERIAL_MAP_DIFFUSE].color = b < 4 ? dry[b] : wet[b - 4];
+        DrawMeshInstanced(r->grain, r->sphere_mat, r->xf + start[b], start[b + 1] - start[b]);
     }
 }
 
@@ -704,6 +741,9 @@ static void draw_cloth(const sim *s, sl_object o) {
     const sl_particle *ids;
     sl_object_particles(s->world, o, &ids);
     Vector3 light = Vector3Normalize((Vector3){0.4f, 0.75f, 0.3f});
+    /* Both sides show with culling off, so each quad needs two triangles instead of four. */
+    rlDrawRenderBatchActive();
+    rlDisableBackfaceCulling();
     for (int j = 0; j + 1 < nv; j++)
         for (int i = 0; i + 1 < nu; i++) {
             Vector3 v[4] = {rv(sl_position(s->world, ids[j * nu + i])), rv(sl_position(s->world, ids[j * nu + i + 1])),
@@ -713,11 +753,11 @@ static void draw_cloth(const sim *s, sl_object o) {
             int stripe = ((i / 4) + (j / 4)) % 2;
             Color c = stripe ? (Color){(unsigned char)(200 * shade), (unsigned char)(70 * shade), (unsigned char)(80 * shade), 255}
                              : (Color){(unsigned char)(240 * shade), (unsigned char)(232 * shade), (unsigned char)(218 * shade), 255};
-            DrawTriangle3D(v[0], v[1], v[2], c);
-            DrawTriangle3D(v[0], v[2], v[3], c);
             DrawTriangle3D(v[0], v[2], v[1], c);
             DrawTriangle3D(v[0], v[3], v[2], c);
         }
+    rlDrawRenderBatchActive();
+    rlEnableBackfaceCulling();
 }
 
 static void draw_rope(const sim *s, sl_object o) {
@@ -744,7 +784,7 @@ static void draw_scene(renderer *r, const sim *s) {
 }
 
 static int surface_pass(renderer *r, targets *t, const sim *s, int kind, Matrix view, Matrix proj, Camera3D cam) {
-    int n = gather_splats(s, kind, r->xf);
+    int n = xf_room(r, sl_count(s->world)) ? gather_splats(s, kind, r->xf) : 0;
     BeginTextureMode(t->depth.rt);
     ClearBackground(BLANK);
     if (n) {
@@ -817,6 +857,7 @@ static void draw_specks(renderer *r, const sim *s, Matrix view, Matrix proj, Cam
     const unsigned char *kind;
     const float *life;
     int n = sl_diffuse(s->world, &pos, NULL, &kind, &life), k = 0;
+    if (!xf_room(r, n)) return;
     for (int i = 0; i < n; i++) {
         float fade = fminf(life[i], 1.0f) * (kind[i] == SL_BUBBLE ? 0.25f : (kind[i] == SL_FOAM ? 0.8f : 0.55f));
         Matrix m = MatrixTranslate(pos[i].x, pos[i].y, pos[i].z);
@@ -845,7 +886,7 @@ static int toolbar(Font font, tools *t, sim *s, Vector2 mouse, int click) {
     for (int i = 0; i < T_COUNT; i++) {
         Rectangle rc = tool_rect(i);
         int over = CheckCollisionPointRec(mouse, rc);
-        if (over && click) { t->tool = i; used = 1; }
+        if (over && click) { set_tool(s, t, i); used = 1; }
         DrawRectangleRounded(rc, 0.3f, 6, t->tool == i ? (Color){60, 110, 170, 230} : (over ? (Color){60, 66, 80, 210} : (Color){34, 38, 50, 200}));
         DrawRectangleRoundedLinesEx(rc, 0.3f, 6, 1.0f, (Color){140, 150, 170, 90});
         DrawTextEx(font, TextFormat("%s  %s", TOOL_KEY_NAMES[i], TOOL_NAMES[i]), (Vector2){rc.x + 12, rc.y + 3}, 27, 1, RAYWHITE);
@@ -942,9 +983,9 @@ int main(int argc, char **argv) {
             focus = Vector3Add(focus, Vector3Add(Vector3Scale(right, -md.x * dist * 0.0012f), Vector3Scale(up, md.y * dist * 0.0012f)));
         }
 
-        for (int k = 0; k < T_COUNT; k++) if (IsKeyPressed(TOOL_KEYS[k])) t.tool = k;
-        for (int k = 0; k < 5; k++) if (IsKeyPressed(KEY_F1 + k)) scene_load(&s, k == 4 ? 0 : k + 1);
-        if (IsKeyPressed(KEY_X)) scene_load(&s, 0);
+        for (int k = 0; k < T_COUNT; k++) if (IsKeyPressed(TOOL_KEYS[k])) set_tool(&s, &t, k);
+        for (int k = 0; k < 5; k++) if (IsKeyPressed(KEY_F1 + k)) { drop_tools(&s, &t); scene_load(&s, k == 4 ? 0 : k + 1); }
+        if (IsKeyPressed(KEY_X)) { drop_tools(&s, &t); scene_load(&s, 0); }
         if (IsKeyPressed(KEY_K)) set_container(&s, !s.container_on);
         if (IsKeyPressed(KEY_SPACE)) paused = !paused;
         if (IsKeyPressed(KEY_T)) set_theme(&r, dark = !dark);
@@ -966,7 +1007,7 @@ int main(int argc, char **argv) {
         if (sh.path && getenv("SLIME_TOOL_TEST")) {
             /* Walks every tool through press, hold and release at a moving point, to smoke-test the tools. */
             int tool = (frame / 12) % T_COUNT, phase = frame % 12;
-            t.tool = tool;
+            set_tool(&s, &t, tool);
             Vector2 at = {(float)w * (0.4f + 0.2f * (float)phase / 12.0f), (float)h * 0.6f};
             use_tools(&s, &t, cam, GetScreenToWorldRay(at, cam), phase == 0, phase < 10, phase == 10);
         } else if (sh.path) { script(&s, &t, frame, cam); use_tools(&s, &t, cam, GetScreenToWorldRay((Vector2){(float)w * 0.5f, (float)h * 0.6f}, cam), 0, 0, 0); }
@@ -1032,6 +1073,7 @@ int main(int argc, char **argv) {
 
     sl_world_destroy(s.world);
     UnloadFont(font);
+    free(r.xf);
     CloseWindow();
     return 0;
 }

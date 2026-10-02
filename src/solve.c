@@ -1,7 +1,5 @@
 #include "internal.h"
 
-static float kernel_grad(float r, float h) { return r < h ? -3.0f * (h - r) * (h - r) : 0.0f; }
-
 static void predict(sl_world *w, int begin, int end, int chunk, void *ctx) {
     (void)chunk; (void)ctx;
     sl_vec3 dv = v3_scale(w->gravity, w->hs);
@@ -101,20 +99,12 @@ static void apply_delta(sl_world *w, int begin, int end, int chunk, void *ctx) {
 static void solve_contact_range(sl_world *w, int begin, int end, int chunk, void *ctx) {
     (void)chunk;
     int base = *(int *)ctx;
-    float d0 = w->spacing;
     for (int k = base + begin; k < base + end; k++) {
         const contact *c = &w->contacts[k];
         int i = c->i, j = c->j;
         if (!(w->flags[i] & F_AWAKE)) continue;
-        const sl_material_desc *mi = &w->materials[w->mat[i]], *mj = &w->materials[w->mat[j]];
-        float dist = d0, mu = 0.5f * (mi->friction + mj->friction), glue = 0;
-        if (w->wet[i] && w->wet[j]) glue = 0.5f * (mi->wet_cohesion + mj->wet_cohesion) * (float)(w->wet[i] < w->wet[j] ? w->wet[i] : w->wet[j]) / 255.0f;
-        if (w->obj[i] >= 0 && w->obj[i] == w->obj[j]) {
-            dist = w->objects[w->obj[i]].self_dist;
-            if (w->objects[w->obj[i]].kind == OBJ_SOFT) mu = 0;
-        }
-        /* Fluid against solids: no friction, and a little closer, so water can flow between grains. */
-        if ((w->flags[i] | w->flags[j]) & F_FLUID) { mu = 0; dist = 0.8f * d0; }
+        float dist = c->dist, mu = c->mu, glue = 0;
+        if (w->wet[i] && w->wet[j]) glue = c->glue * (float)(w->wet[i] < w->wet[j] ? w->wet[i] : w->wet[j]);
         sl_vec3 d = v3_sub(w->p[i], w->p[j]);
         float r2 = v3_len2(d);
         float wi = w->inv_mass[i] * c->lift, wj = w->inv_mass[j], ws = wi + wj;
@@ -150,12 +140,11 @@ static void solve_contact_range(sl_world *w, int begin, int end, int chunk, void
 static void stabilize_range(sl_world *w, int begin, int end, int chunk, void *ctx) {
     (void)chunk;
     int base = *(int *)ctx;
-    float d0 = w->spacing;
     for (int k = base + begin; k < base + end; k++) {
         const contact *c = &w->contacts[k];
         int i = c->i, j = c->j;
         if (!(w->flags[i] & F_AWAKE) || (w->obj[i] >= 0 && w->obj[i] == w->obj[j])) continue;
-        float dist = (w->flags[i] | w->flags[j]) & F_FLUID ? 0.8f * d0 : d0;
+        float dist = c->dist;
         sl_vec3 d = v3_sub(w->x[i], w->x[j]);
         float r2 = v3_len2(d), wi = w->inv_mass[i], wj = w->inv_mass[j], ws = wi + wj;
         if (r2 >= dist * dist || r2 < 1e-18f || ws <= 0) continue;
@@ -166,24 +155,18 @@ static void stabilize_range(sl_world *w, int begin, int end, int chunk, void *ct
     }
 }
 
-void stabilize(sl_world *w) {
+/* Runs fn over each color in turn; ctx is the color's first index. The overflow color shares
+   particles, so it runs on one thread. */
+void run_colors(sl_world *w, const int *offsets, sl_range_fn fn) {
     for (int color = 0; color <= SL_MAX_COLORS; color++) {
-        int base = w->color_off[color], count = w->color_off[color + 1] - base;
+        int base = offsets[color], count = offsets[color + 1] - base;
         if (count <= 0) continue;
-        if (color == SL_MAX_COLORS || count < SL_CHUNK) stabilize_range(w, 0, count, 0, &base);
-        else sl__parallel(w, count, stabilize_range, &base);
+        if (color == SL_MAX_COLORS || count < SL_CHUNK) fn(w, 0, count, 0, &base);
+        else sl__parallel(w, count, fn, &base);
     }
 }
 
-static void solve_contacts(sl_world *w) {
-    for (int color = 0; color <= SL_MAX_COLORS; color++) {
-        int base = w->color_off[color], count = w->color_off[color + 1] - base;
-        if (count <= 0) continue;
-        /* The overflow color has shared particles, so it runs on one thread. */
-        if (color == SL_MAX_COLORS || count < SL_CHUNK) solve_contact_range(w, 0, count, 0, &base);
-        else sl__parallel(w, count, solve_contact_range, &base);
-    }
-}
+void stabilize(sl_world *w) { run_colors(w, w->color_off, stabilize_range); }
 
 static void update_velocities(sl_world *w, int begin, int end, int chunk, void *ctx) {
     (void)chunk; (void)ctx;
@@ -224,9 +207,9 @@ static void fluid_curl(sl_world *w, int begin, int end, int chunk, void *ctx) {
 
 /* XSPH viscosity, vorticity confinement and cohesion between fluid particles, once per step. */
 static void fluid_velocity(sl_world *w, int begin, int end, int chunk, void *ctx) {
-    (void)chunk; (void)ctx;
+    (void)chunk;
     float h = w->h, h2 = h * h, d0 = w->spacing, inv_rest = 1.0f / w->w_rest, band = (h - d0) * 0.5f;
-    float dt = w->dt;
+    float dt = w->dt, *visc_step = ctx;
     for (int k = begin; k < end; k++) {
         int i = w->active[k];
         w->delta[i] = w->v[i];
@@ -246,8 +229,7 @@ static void fluid_velocity(sl_world *w, int begin, int end, int chunk, void *ctx
             if (vort && r > 1e-9f) eta = v3_madd(eta, d, -(v3_len(w->tmp[j]) - wi) * kernel_grad(r, h) * inv_rest / r);
             if (coh && r > d0) pull = v3_madd(pull, d, (r - d0) * (h - r) / (band * band * r));
         }
-        float visc_step = 1.0f - powf(1.0f - fminf(m->viscosity, 1.0f), (float)w->substeps);
-        sl_vec3 v = v3_madd(w->v[i], visc, visc_step);
+        sl_vec3 v = v3_madd(w->v[i], visc, visc_step[w->mat[i]]);
         v = v3_madd(v, pull, m->cohesion * dt);
         float el = v3_len(eta);
         if (m->vorticity > 0 && el > 1e-9f)
@@ -264,8 +246,8 @@ static void copy_velocity(sl_world *w, int begin, int end, int chunk, void *ctx)
 /* Grabbed particles sweep from last step's target to the new one, so they move smoothly and can be thrown. */
 void move_grabs(sl_world *w, float t) {
     for (int g = 0; g < w->grab_count; g++) {
-        int id = w->grabs[g].id, s = id >= 0 && id < w->next_id ? w->id_slot[id] : -1;
-        if (s >= 0 && s < w->count && w->id[s] == id) w->p[s] = v3_lerp(w->grabs[g].from, w->grabs[g].to, t);
+        int s = slot_of(w, w->grabs[g].id);
+        if (s >= 0) w->p[s] = v3_lerp(w->grabs[g].from, w->grabs[g].to, t);
     }
 }
 
@@ -286,7 +268,7 @@ void solve_substep(sl_world *w, float t) {
     /* Without grain contacts or objects there is nothing to iterate, so colliders need a single pass. */
     int passes = w->contact_count || w->dist_count || w->cluster_count ? w->iterations : 1;
     for (int k = 0; k < passes; k++) {
-        solve_contacts(w);
+        run_colors(w, w->color_off, solve_contact_range);
         objects_solve(w);
         solve_colliders(w);
     }
@@ -295,14 +277,17 @@ void solve_substep(sl_world *w, float t) {
 
 void fluid_step(sl_world *w) {
     int extras = 0, vort = 0, n = w->active_count;
+    float visc_step[SL_MAX_MATERIALS];
     for (int m = 0; m < w->material_count; m++) {
         const sl_material_desc *md = &w->materials[m];
+        /* Viscosity is applied once per step, so it is compounded over the substeps it stands for. */
+        visc_step[m] = 1.0f - powf(1.0f - fminf(fmaxf(md->viscosity, 0.0f), 1.0f), (float)w->substeps);
         if (md->kind != SL_FLUID) continue;
         extras |= md->viscosity > 0 || md->cohesion > 0 || md->vorticity > 0;
         vort |= md->vorticity > 0;
     }
     if (!extras) return;
     if (vort) sl__parallel(w, n, fluid_curl, NULL);
-    sl__parallel(w, n, fluid_velocity, NULL);
+    sl__parallel(w, n, fluid_velocity, visc_step);
     sl__parallel(w, n, copy_velocity, NULL);
 }

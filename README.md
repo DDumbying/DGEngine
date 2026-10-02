@@ -170,19 +170,20 @@ calm for half a second sleeps until something wakes it.
 ## Performance
 
 `slime_bench` on a 4 vCPU 2.1 GHz cloud Xeon, `Release` build. "First 1 s" is the most violent
-part of each scene; "after 26 s" is the same scene later on.
+part of each scene; "after 26 s" is the same scene later on. Shared cloud machines vary by up to a
+third between runs, so compare numbers from the same run.
 
 | Scene | Particles | Threads | First 1 s, ms/step | After 26 s, ms/step |
 |---|---|---|---|---|
-| Dam break next to sand | 1,500 | 4 | 3.8 | 0.02 (asleep) |
-| Dam break next to sand | 8,400 | 1 | 54.8 | 41.9 |
-| Dam break next to sand | 8,400 | 4 | 26.1 | 14.2 |
-| Dam break next to sand | 14,000 | 4 | 35.3 | 24.5 |
-| Water pool | 5,500 | 4 | 13.7 | 0.02 (asleep) |
-| Water pool with ellipsoids and spray | 8,400 | 4 | 23.6 | 16.0 |
+| Dam break next to sand | 1,500 | 4 | 5.5 | 0.04 (asleep) |
+| Dam break next to sand | 8,400 | 1 | 86.2 | 56.9 |
+| Dam break next to sand | 8,400 | 4 | 36.8 | 21.2 |
+| Dam break next to sand | 14,000 | 4 | 59.9 | 28.9 |
+| Water pool | 5,500 | 4 | 21.8 | 0.04 (asleep) |
+| Water pool with ellipsoids and spray | 8,400 | 4 | 35.1 | 22.0 |
 
 Calm scenes sleep and cost almost nothing. In the larger sand scenes water is still seeping
-through the sand after 26 seconds, so they are still awake. Memory is about 700 to 900 bytes per
+through the sand after 26 seconds, so they are still awake. Memory is about 750 to 950 bytes per
 particle, a little more with surface ellipsoids, including headroom for the busiest moment. The
 violent case is still slower than the goal of 10k particles under 8 ms on 4 cores; the remaining
 costs are the fluid pressure passes and the neighbor rebuilds that fast water needs.

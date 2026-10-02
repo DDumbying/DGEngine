@@ -8,6 +8,20 @@ static int hash_cell(int x, int y, int z, int mask) {
     return (int)(h & (unsigned)mask);
 }
 
+/* The distinct hash buckets of the 27 cells around x. */
+static int hash_buckets(const grid *g, sl_vec3 x, int *buckets) {
+    int nb = 0, mask = g->table_size - 1;
+    int cx = cell_coord(x.x, g->cell), cy = cell_coord(x.y, g->cell), cz = cell_coord(x.z, g->cell);
+    for (int dz = -1; dz <= 1; dz++)
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+                int b = hash_cell(cx + dx, cy + dy, cz + dz, mask), dup = 0;
+                for (int k = 0; k < nb && !dup; k++) dup = buckets[k] == b;
+                if (!dup) buckets[nb++] = b;
+            }
+    return nb;
+}
+
 static int cell_of(const grid *g, sl_vec3 x) {
     if (g->dense) {
         int ix = (int)((x.x - g->origin.x) / g->cell), iy = (int)((x.y - g->origin.y) / g->cell), iz = (int)((x.z - g->origin.z) / g->cell);
@@ -66,6 +80,7 @@ static void reorder(sl_world *w) {
     PERMUTE(float, w->mass, fs);
     PERMUTE(int, w->id, is);
     PERMUTE(int, w->obj, is);
+    PERMUTE(int, w->material, is);
     w->tmp = vs; w->lambda = fs; w->island = is;
 
     unsigned char *bytes = (unsigned char *)g->bucket;
@@ -80,6 +95,10 @@ static void reorder(sl_world *w) {
     for (int half = 0; half < 2; half++) {
         for (int k = 0; k < n; k++) w->tmp[k] = w->push[2 * g->sorted[k] + half];
         for (int k = 0; k < n; k++) w->push[2 * k + half] = w->tmp[k];
+    }
+    for (int q = 0; w->use_aniso && q < 4; q++) {
+        for (int k = 0; k < n; k++) w->tmp[k] = w->aniso[4 * g->sorted[k] + q];
+        for (int k = 0; k < n; k++) w->aniso[4 * k + q] = w->tmp[k];
     }
     for (int k = 0; k < n; k++) { w->id_slot[w->id[k]] = k; g->bucket[g->sorted[k]] = k; }
     objects_remap(w, g->bucket);
@@ -107,15 +126,7 @@ static int scan_forward(sl_world *w, int a, int *out, int room, float range2) {
         }
         return n;
     }
-    int buckets[27], nb = 0, mask = g->table_size - 1;
-    int cx = cell_coord(x.x, g->cell), cy = cell_coord(x.y, g->cell), cz = cell_coord(x.z, g->cell);
-    for (int dz = -1; dz <= 1; dz++)
-        for (int dy = -1; dy <= 1; dy++)
-            for (int dx = -1; dx <= 1; dx++) {
-                int b = hash_cell(cx + dx, cy + dy, cz + dz, mask), dup = 0;
-                for (int k = 0; k < nb && !dup; k++) dup = buckets[k] == b;
-                if (!dup) buckets[nb++] = b;
-            }
+    int buckets[27], nb = hash_buckets(g, x, buckets);
     for (int b = 0; b < nb; b++)
         for (int t = g->start[buckets[b]]; t < g->start[buckets[b] + 1]; t++)
             if (t > a) TRY(t);
@@ -181,50 +192,83 @@ static int needs_contact(const sl_world *w, int i, int j, float reach2) {
     return v3_len2(v3_sub(w->x[i], w->x[j])) < reach2;
 }
 
-static int collect_contacts(sl_world *w) {
-    float reach = w->spacing + w->skin, reach2 = reach * reach;
-    float glen = v3_len(w->gravity), shock = 0.6931f / w->spacing;
-    sl_vec3 up = glen > 0 ? v3_scale(w->gravity, -1.0f / glen) : v3(0, 0, 0);
-    int n = 0;
-    for (int k = 0; k < w->pair_count; k++) n += needs_contact(w, w->pairs[2 * k], w->pairs[2 * k + 1], reach2);
-    if (!sl__grow(w, (void **)&w->contact_tmp, &w->contact_tmp_cap, n, sizeof(contact))
-        || !sl__grow(w, (void **)&w->contacts, &w->contact_cap, n, sizeof(contact))) return 0;
-    n = 0;
-    for (int k = 0; k < w->pair_count; k++) {
+typedef struct { float reach2, shock; sl_vec3 up; int fill; } contact_ctx;
+
+/* Two passes over fixed chunks of pairs: count, then fill at the chunk's offset, so the order never depends on threads. */
+static void contact_range(sl_world *w, int begin, int end, int chunk, void *ctx) {
+    contact_ctx *c = ctx;
+    if (!c->fill) {
+        int n = 0;
+        for (int k = begin; k < end; k++) n += needs_contact(w, w->pairs[2 * k], w->pairs[2 * k + 1], c->reach2);
+        w->chunk_buf[chunk] = n;
+        return;
+    }
+    contact *out = w->contact_tmp + w->chunk_buf[chunk];
+    for (int k = begin; k < end; k++) {
         int i = w->pairs[2 * k], j = w->pairs[2 * k + 1];
-        if (!needs_contact(w, i, j, reach2)) continue;
+        if (!needs_contact(w, i, j, c->reach2)) continue;
         /* Shock propagation: the upper particle acts lighter, so piles carry their weight down.
            Only between solids; fluid below a grain must not act as a floor. */
-        float h = fminf(fmaxf(v3_dot(v3_sub(w->x[i], w->x[j]), up), -w->spacing), w->spacing);
+        float h = fminf(fmaxf(v3_dot(v3_sub(w->x[i], w->x[j]), c->up), -w->spacing), w->spacing);
+        const sl_material_desc *mi = &w->materials[w->mat[i]], *mj = &w->materials[w->mat[j]];
+        float mu = 0.5f * (mi->friction + mj->friction), dist = w->spacing;
+        if (w->obj[i] >= 0 && w->obj[i] == w->obj[j]) {
+            dist = w->objects[w->obj[i]].self_dist;
+            if (w->objects[w->obj[i]].kind == OBJ_SOFT) mu = 0;
+        }
+        /* Fluid against solids: no friction, and a little closer, so water can flow between grains. */
         int wet = (w->flags[i] | w->flags[j]) & F_FLUID;
-        w->contact_tmp[n++] = (contact){i, j, wet ? 1.0f : expf(shock * h), 0};
+        if (wet) { mu = 0; dist = 0.8f * w->spacing; }
+        *out++ = (contact){i, j, wet ? 1.0f : expf(c->shock * h), mu, dist, 0.5f * (mi->wet_cohesion + mj->wet_cohesion) / 255.0f};
     }
+}
+
+static int collect_contacts(sl_world *w) {
+    float reach = w->spacing + w->skin, glen = v3_len(w->gravity);
+    contact_ctx c = {reach * reach, 0.6931f / w->spacing, glen > 0 ? v3_scale(w->gravity, -1.0f / glen) : v3(0, 0, 0), 0};
+    int chunks = sl__chunks(w->pair_count), n = 0;
+    if (!sl__grow(w, (void **)&w->chunk_buf, &w->chunk_cap, chunks + 1, sizeof(int))) return 0;
+    sl__parallel(w, w->pair_count, contact_range, &c);
+    for (int k = 0; k < chunks; k++) { int count = w->chunk_buf[k]; w->chunk_buf[k] = n; n += count; }
+    if (!sl__grow(w, (void **)&w->contact_tmp, &w->contact_tmp_cap, n, sizeof(contact))
+        || !sl__grow(w, (void **)&w->contacts, &w->contact_cap, n, sizeof(contact))) return 0;
+    c.fill = 1;
+    sl__parallel(w, w->pair_count, contact_range, &c);
     w->contact_count = n;
     return 1;
 }
 
-/* Greedy coloring: no two contacts in one color share a particle, so a color can run in parallel. */
-static void color_contacts(sl_world *w) {
+/* Greedy coloring of index pairs read from ends with the given stride: no two pairs in one color share
+   an index, so a color can run in parallel. Colors go to w->colors, color starts to offsets. */
+int color_graph(sl_world *w, const int *ends, int stride, int count, int *offsets) {
     unsigned long long *used = (unsigned long long *)(void *)w->tmp;
-    int counts[SL_MAX_COLORS + 1] = {0}, fill[SL_MAX_COLORS + 1];
+    int counts[SL_MAX_COLORS + 1] = {0};
+    if (!sl__grow(w, (void **)&w->colors, &w->color_cap, count + 1, 1)) return 0;
     for (int s = 0; s < w->count; s++) used[s] = 0;
-    for (int k = 0; k < w->contact_count; k++) {
-        contact *c = &w->contact_tmp[k];
-        unsigned long long free_bits = ~(used[c->i] | used[c->j]);
-        int color = SL_MAX_COLORS;
+    for (int k = 0; k < count; k++) {
+        int a = ends[(size_t)k * stride], b = ends[(size_t)k * stride + 1], color = SL_MAX_COLORS;
+        unsigned long long free_bits = ~(used[a] | used[b]);
         if (free_bits) {
             color = 0;
             while (!(free_bits >> color & 1ull)) color++;
-            used[c->i] |= 1ull << color;
-            used[c->j] |= 1ull << color;
+            used[a] |= 1ull << color;
+            used[b] |= 1ull << color;
         }
-        c->color = color;
+        w->colors[k] = (unsigned char)color;
         counts[color]++;
     }
     int sum = 0;
-    for (int c = 0; c <= SL_MAX_COLORS; c++) { w->color_off[c] = fill[c] = sum; sum += counts[c]; }
-    w->color_off[SL_MAX_COLORS + 1] = sum;
-    for (int k = 0; k < w->contact_count; k++) w->contacts[fill[w->contact_tmp[k].color]++] = w->contact_tmp[k];
+    for (int c = 0; c <= SL_MAX_COLORS; c++) { offsets[c] = sum; sum += counts[c]; }
+    offsets[SL_MAX_COLORS + 1] = sum;
+    return 1;
+}
+
+static int color_contacts(sl_world *w) {
+    int fill[SL_MAX_COLORS + 2];
+    if (!color_graph(w, (const int *)(void *)w->contact_tmp, (int)(sizeof(contact) / sizeof(int)), w->contact_count, w->color_off)) return 0;
+    memcpy(fill, w->color_off, sizeof fill);
+    for (int k = 0; k < w->contact_count; k++) w->contacts[fill[w->colors[k]]++] = w->contact_tmp[k];
+    return 1;
 }
 
 static int find(int *parent, int a) {
@@ -280,23 +324,40 @@ void update_islands(sl_world *w) {
     w->active_count = n;
 }
 
+/* Out of memory partway: no contacts and one awake island, so the step stays safe until a rebuild works. */
+static int rebuild_failed(sl_world *w) {
+    w->contact_count = w->pair_count = 0;
+    memset(w->color_off, 0, sizeof w->color_off);
+    if (w->nbr_off) for (int s = 0; s <= w->count; s++) w->nbr_off[s] = 0;
+    for (int s = 0; s < w->count; s++) { w->island[s] = 0; w->active[s] = s; w->flags[s] |= F_AWAKE; }
+    w->island_count = w->count ? 1 : 0;
+    w->active_count = w->count;
+    w->built = w->count;
+    w->nbr_valid = 0;
+    return 0;
+}
+
 int grid_rebuild(sl_world *w, int move) {
     int n = w->count;
-    if (n == 0) { w->active_count = 0; w->contact_count = 0; w->island_count = 0; if (w->nbr_off) w->nbr_off[0] = 0; return 1; }
-    if (!setup_grid(w)) return 0;
+    w->nbr_valid = 0;
+    if (n == 0) {
+        w->active_count = w->contact_count = w->pair_count = w->island_count = w->built = 0;
+        memset(w->color_off, 0, sizeof w->color_off);
+        if (w->nbr_off) w->nbr_off[0] = 0;
+        return 1;
+    }
+    if (!setup_grid(w)) return rebuild_failed(w);
     sort_cells(w);
     if (move) reorder(w);
     if (w->mem_dirty && objects_membership(w)) w->mem_dirty = 0;
     for (int s = 0; s < n; s++) { w->p[s] = w->x[s]; w->x_build[s] = w->x[s]; }
 
     float range = w->h + w->skin;
-    if (!gather_pairs(w, range * range)) return 0;
-    if (!build_neighbors(w) || !collect_contacts(w)) return 0;
-    color_contacts(w);
-
+    if (!gather_pairs(w, range * range) || !build_neighbors(w) || !collect_contacts(w) || !color_contacts(w)) return rebuild_failed(w);
     build_islands(w);
     update_islands(w);
     w->built = n;
+    w->nbr_valid = 1;
     return 1;
 }
 
@@ -323,15 +384,7 @@ int grid_fluid_near(sl_world *w, sl_vec3 x, sl_vec3 *avg_vel) {
                 }
             }
     } else {
-        int buckets[27], nb = 0, mask = g->table_size - 1;
-        int cx = cell_coord(x.x, g->cell), cy = cell_coord(x.y, g->cell), cz = cell_coord(x.z, g->cell);
-        for (int dz = -1; dz <= 1; dz++)
-            for (int dy = -1; dy <= 1; dy++)
-                for (int dx = -1; dx <= 1; dx++) {
-                    int b = hash_cell(cx + dx, cy + dy, cz + dz, mask), dup = 0;
-                    for (int k = 0; k < nb && !dup; k++) dup = buckets[k] == b;
-                    if (!dup) buckets[nb++] = b;
-                }
+        int buckets[27], nb = hash_buckets(g, x, buckets);
         for (int b = 0; b < nb; b++)
             for (int t = g->start[buckets[b]]; t < g->start[buckets[b] + 1]; t++) {
                 int s = g->sorted[t];
