@@ -38,7 +38,7 @@ static float sdf_local(const sl_collider_desc *d, sl_vec3 p, sl_vec3 *n) {
 }
 
 /* World space signed distance at the collider's current transform, with outward normal. */
-float collider_distance(const collider *col, sl_vec3 p, sl_vec3 *n) {
+float sl__collider_distance(const collider *col, sl_vec3 p, sl_vec3 *n) {
     sl_vec3 local = q_rotate(q_conj(col->rot), v3_sub(p, col->desc.position)), ln;
     float d = sdf_local(&col->desc, local, &ln);
     if (col->desc.inside) { d = -d; ln = v3_scale(ln, -1.0f); }
@@ -51,7 +51,7 @@ static void frame(const collider *col, float t, sl_vec3 *pos, quat *rot) {
     *rot = q_nlerp(col->prev_rot, col->rot, t);
 }
 
-void collider_frames(sl_world *w, float t) {
+void sl__collider_frames(sl_world *w, float t) {
     float t0 = t - 1.0f / (float)w->substeps;
     for (int c = 0; c < w->collider_count; c++) {
         collider *col = &w->colliders[c];
@@ -61,7 +61,7 @@ void collider_frames(sl_world *w, float t) {
 }
 
 /* Density a wall adds, as if the fluid lattice continued behind it; z is the gap to that first hidden layer. */
-void wall_table_init(sl_world *w) {
+void sl__wall_table_init(sl_world *w) {
     float d = w->spacing, h = w->h;
     int n = (int)ceilf(h / d);
     for (int s = 0; s <= SL_WALL_SAMPLES; s++) {
@@ -86,13 +86,17 @@ static float wall_sample(const sl_world *w, float z, float *slope) {
 
 typedef struct { float rho; sl_vec3 grad; } wall_sum;
 
-/* Each particle remembers what it gave to up to two colliders, so sleeping particles still load them. */
-void book_push(sl_world *w, int i, int collider, sl_vec3 impulse) {
-    unsigned char id = (unsigned char)(collider + 1), *ids = &w->push_id[2 * i];
-    int k = ids[0] == id || ids[0] == 0 ? 0 : 1;
-    if (ids[k] != id && ids[k] != 0) return;
-    ids[k] = id;
-    w->push[2 * i + k] = v3_add(w->push[2 * i + k], impulse);
+/* Each particle remembers what it gave to up to SL_PUSH_SLOTS colliders, so sleeping particles still load them. */
+void sl__book_push(sl_world *w, int i, int collider, sl_vec3 impulse) {
+    unsigned char id = (unsigned char)(collider + 1), *ids = &w->push_id[SL_PUSH_SLOTS * i];
+    int k = 0, empty = -1;
+    while (k < SL_PUSH_SLOTS && ids[k] != id) { if (empty < 0 && !ids[k]) empty = k; k++; }
+    if (k == SL_PUSH_SLOTS) {
+        if (empty < 0) return;
+        k = empty;
+        ids[k] = id;
+    }
+    w->push[SL_PUSH_SLOTS * i + k] = v3_add(w->push[SL_PUSH_SLOTS * i + k], impulse);
 }
 
 static void add_wall(sl_world *w, int i, int c, float dist, sl_vec3 n, wall_sum *sum, float scale) {
@@ -101,11 +105,11 @@ static void add_wall(sl_world *w, int i, int c, float dist, sl_vec3 n, wall_sum 
     sl_vec3 g = v3_scale(n, slope);
     sum->rho += v;
     sum->grad = v3_add(sum->grad, g);
-    if (scale != 0) book_push(w, i, c, v3_scale(g, -scale));
+    if (scale != 0) sl__book_push(w, i, c, v3_scale(g, -scale));
 }
 
 /* Wall density and its gradient at particle i; a nonzero scale also books the push per collider. */
-float wall_density(sl_world *w, int i, sl_vec3 *grad, float scale) {
+float sl__wall_density(sl_world *w, int i, sl_vec3 *grad, float scale) {
     wall_sum sum = {0, v3(0, 0, 0)};
     float reach = w->h + w->radius;
     for (int c = 0; c < w->collider_count; c++) {
@@ -113,7 +117,7 @@ float wall_density(sl_world *w, int i, sl_vec3 *grad, float scale) {
         const sl_collider_desc *d = &col->desc;
         if (!col->enabled) continue;
         if (!d->inside && d->shape != SL_PLANE) {
-            float far = bound_radius(d) + reach;
+            float far = sl__bound_radius(d) + reach;
             if (v3_len2(v3_sub(w->p[i], col->pos_t)) > far * far) continue;
         }
         sl_vec3 n;
@@ -148,7 +152,7 @@ static void push_out(sl_world *w, int i, sl_vec3 n, float pen, sl_vec3 surf_move
         float f = tl < mu * pen ? 1.0f : fminf(mu * pen / tl, 1.0f);
         w->p[i] = v3_madd(w->p[i], tan, -f);
     }
-    book_push(w, i, c, v3_scale(v3_sub(w->p[i], before), -w->mass[i] / w->hs));
+    sl__book_push(w, i, c, v3_scale(v3_sub(w->p[i], before), -w->mass[i] / w->hs));
 }
 
 /* Steps along the move of a fast particle so it cannot pass through a thin collider. A particle
@@ -181,7 +185,7 @@ static void collide_range(sl_world *w, int begin, int end, int chunk, void *ctx)
         int container = d->shape == SL_BOX && d->inside;
         int can_tunnel = !d->inside && d->shape != SL_PLANE;
         quat inv = q_conj(col->rot_t);
-        float mu = d->friction, far = bound_radius(d) + r;
+        float mu = d->friction, far = sl__bound_radius(d) + r;
 
         for (int k = begin; k < end; k++) {
             int i = w->active[k];
@@ -215,6 +219,6 @@ static void collide_range(sl_world *w, int begin, int end, int chunk, void *ctx)
     }
 }
 
-void solve_colliders(sl_world *w) {
+void sl__solve_colliders(sl_world *w) {
     if (w->collider_count) sl__parallel(w, w->active_count, collide_range, NULL);
 }

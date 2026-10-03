@@ -53,10 +53,14 @@ void sl__parallel_sized(sl_world *w, int count, int size, sl_range_fn fn, void *
 #endif
     if (chunks == 1 || (!w->pool && !w->tasks.parallel_for)) run_range(0, chunks, &job);
     else if (w->tasks.parallel_for) w->tasks.parallel_for(run_range, chunks, &job, w->tasks.user);
-    else pool_run(w->pool, run_range, chunks, &job);
+    else sl__pool_run(w->pool, run_range, chunks, &job);
 }
 
 void sl__parallel(sl_world *w, int count, sl_range_fn fn, void *ctx) { sl__parallel_sized(w, count, SL_CHUNK, fn, ctx); }
+
+/* Workers spin this many pauses between jobs, which covers the short gaps between passes, then block so a long
+   serial phase or the time between steps does not cost a core per worker. */
+#define SPIN_LIMIT 4000
 
 #ifdef _WIN32
 
@@ -69,17 +73,20 @@ struct sl_pool {
     CRITICAL_SECTION lock;
     CONDITION_VARIABLE cv;
     volatile LONG64 work;
-    volatile LONG done, awake, quit;
+    volatile LONG done, quit, sleepers;
     sl_task_fn *volatile task;
     void *volatile ctx;
     unsigned gen;
     int inited;
 };
 
+static unsigned long long load_work(sl_pool *p) { return (unsigned long long)InterlockedCompareExchange64(&p->work, 0, 0); }
+static int has_work(sl_pool *p) { unsigned long long v = load_work(p); return JOB_NEXT(v) < JOB_COUNT(v); }
+
 static int take_chunks(sl_pool *p) {
     int took = 0;
     for (;;) {
-        unsigned long long v = (unsigned long long)InterlockedCompareExchange64(&p->work, 0, 0);
+        unsigned long long v = load_work(p);
         if (JOB_NEXT(v) >= JOB_COUNT(v)) return took;
         if ((unsigned long long)InterlockedCompareExchange64(&p->work, (LONG64)(v + 1), (LONG64)v) != v) continue;
         int c = (int)JOB_NEXT(v);
@@ -91,26 +98,27 @@ static int take_chunks(sl_pool *p) {
 
 static DWORD WINAPI worker(LPVOID arg) {
     sl_pool *p = arg;
-    for (;;) {
+    int spins = 0;
+    while (!InterlockedCompareExchange(&p->quit, 0, 0)) {
+        if (take_chunks(p)) { spins = 0; continue; }
+        if (++spins < SPIN_LIMIT) { SPIN_PAUSE(); continue; }
+        /* Counted as a sleeper before the last look for work, so pool_run either sees us or we see its job. */
+        InterlockedIncrement(&p->sleepers);
         EnterCriticalSection(&p->lock);
-        while (!p->awake && !p->quit) SleepConditionVariableCS(&p->cv, &p->lock, INFINITE);
+        while (!InterlockedCompareExchange(&p->quit, 0, 0) && !has_work(p)) SleepConditionVariableCS(&p->cv, &p->lock, INFINITE);
         LeaveCriticalSection(&p->lock);
-        if (p->quit) return 0;
-        int spins = 0;
-        while (p->awake) {
-            if (take_chunks(p)) spins = 0;
-            else if (++spins > 2000) { SwitchToThread(); spins = 0; }
-            else SPIN_PAUSE();
-        }
+        InterlockedDecrement(&p->sleepers);
+        spins = 0;
     }
+    return 0;
 }
 
-sl_pool *pool_create(sl_world *w, int threads) {
+sl_pool *sl__pool_create(sl_world *w, int threads) {
     sl_pool *p = sl__alloc(w, sizeof *p);
     if (!p) return NULL;
     ZeroMemory(p, sizeof *p);
     p->threads = sl__alloc(w, sizeof(HANDLE) * (size_t)threads);
-    if (!p->threads) { pool_destroy(w, p); return NULL; }
+    if (!p->threads) { sl__pool_destroy(w, p); return NULL; }
     InitializeCriticalSection(&p->lock);
     InitializeConditionVariable(&p->cv);
     p->inited = 1;
@@ -121,12 +129,11 @@ sl_pool *pool_create(sl_world *w, int threads) {
     return p;
 }
 
-void pool_destroy(sl_world *w, sl_pool *p) {
+void sl__pool_destroy(sl_world *w, sl_pool *p) {
     if (!p) return;
     if (p->inited) {
         EnterCriticalSection(&p->lock);
-        p->quit = 1;
-        p->awake = 0;
+        InterlockedExchange(&p->quit, 1);
         WakeAllConditionVariable(&p->cv);
         LeaveCriticalSection(&p->lock);
         for (int i = 0; i < p->count; i++) { WaitForSingleObject(p->threads[i], INFINITE); CloseHandle(p->threads[i]); }
@@ -136,21 +143,17 @@ void pool_destroy(sl_world *w, sl_pool *p) {
     sl__free(w, p);
 }
 
-void pool_wake(sl_pool *p) {
-    EnterCriticalSection(&p->lock);
-    p->awake = 1;
-    WakeAllConditionVariable(&p->cv);
-    LeaveCriticalSection(&p->lock);
-}
-
-void pool_sleep(sl_pool *p) { InterlockedExchange(&p->awake, 0); }
-
-void pool_run(sl_pool *p, sl_task_fn *task, int count, void *ctx) {
+void sl__pool_run(sl_pool *p, sl_task_fn *task, int count, void *ctx) {
     p->task = task;
     p->ctx = ctx;
     InterlockedExchange(&p->done, 0);
     p->gen++;
     InterlockedExchange64(&p->work, (LONG64)JOB_PACK(p->gen, count));
+    if (InterlockedCompareExchange(&p->sleepers, 0, 0)) {
+        EnterCriticalSection(&p->lock);
+        WakeAllConditionVariable(&p->cv);
+        LeaveCriticalSection(&p->lock);
+    }
     take_chunks(p);
     for (int spins = 0; InterlockedCompareExchange(&p->done, 0, 0) < count;) if (++spins > 2000) { SwitchToThread(); spins = 0; } else SPIN_PAUSE();
 }
@@ -167,12 +170,14 @@ struct sl_pool {
     pthread_mutex_t lock;
     pthread_cond_t cv;
     _Atomic unsigned long long work;
-    atomic_int done, awake, quit;
+    atomic_int done, quit, sleepers;
     sl_task_fn *_Atomic task;
     void *_Atomic ctx;
     unsigned gen;
     int inited;
 };
+
+static int has_work(sl_pool *p) { unsigned long long v = atomic_load(&p->work); return JOB_NEXT(v) < JOB_COUNT(v); }
 
 /* Runs chunks of the current job until none are left; the task is read only after a successful claim,
    when the job cannot have been replaced yet. */
@@ -192,35 +197,35 @@ static int take_chunks(sl_pool *p) {
 
 static void *worker(void *arg) {
     sl_pool *p = arg;
-    for (;;) {
+    int spins = 0;
+    while (!atomic_load(&p->quit)) {
+        if (take_chunks(p)) { spins = 0; continue; }
+        if (++spins < SPIN_LIMIT) { SPIN_PAUSE(); continue; }
+        /* Counted as a sleeper before the last look for work, so pool_run either sees us or we see its job. */
+        atomic_fetch_add(&p->sleepers, 1);
         pthread_mutex_lock(&p->lock);
-        while (!atomic_load(&p->awake) && !atomic_load(&p->quit)) pthread_cond_wait(&p->cv, &p->lock);
+        while (!atomic_load(&p->quit) && !has_work(p)) pthread_cond_wait(&p->cv, &p->lock);
         pthread_mutex_unlock(&p->lock);
-        if (atomic_load(&p->quit)) return NULL;
-        /* Spin while a step is running: passes are short, so waking from sleep would cost more. */
-        int spins = 0;
-        while (atomic_load(&p->awake)) {
-            if (take_chunks(p)) spins = 0;
-            else if (++spins > 2000) { sched_yield(); spins = 0; }
-            else SPIN_PAUSE();
-        }
+        atomic_fetch_sub(&p->sleepers, 1);
+        spins = 0;
     }
+    return NULL;
 }
 
-sl_pool *pool_create(sl_world *w, int threads) {
+sl_pool *sl__pool_create(sl_world *w, int threads) {
     sl_pool *p = sl__alloc(w, sizeof *p);
     if (!p) return NULL;
     p->count = 0;
     p->inited = 0;
     p->gen = 0;
     p->threads = sl__alloc(w, sizeof(pthread_t) * (size_t)threads);
-    if (!p->threads) { pool_destroy(w, p); return NULL; }
+    if (!p->threads) { sl__pool_destroy(w, p); return NULL; }
     pthread_mutex_init(&p->lock, NULL);
     pthread_cond_init(&p->cv, NULL);
     atomic_init(&p->work, 0);
     atomic_init(&p->done, 0);
-    atomic_init(&p->awake, 0);
     atomic_init(&p->quit, 0);
+    atomic_init(&p->sleepers, 0);
     atomic_init(&p->task, NULL);
     atomic_init(&p->ctx, NULL);
     p->inited = 1;
@@ -229,12 +234,11 @@ sl_pool *pool_create(sl_world *w, int threads) {
     return p;
 }
 
-void pool_destroy(sl_world *w, sl_pool *p) {
+void sl__pool_destroy(sl_world *w, sl_pool *p) {
     if (!p) return;
     if (p->inited) {
         pthread_mutex_lock(&p->lock);
         atomic_store(&p->quit, 1);
-        atomic_store(&p->awake, 0);
         pthread_cond_broadcast(&p->cv);
         pthread_mutex_unlock(&p->lock);
         for (int i = 0; i < p->count; i++) pthread_join(p->threads[i], NULL);
@@ -245,23 +249,20 @@ void pool_destroy(sl_world *w, sl_pool *p) {
     sl__free(w, p);
 }
 
-void pool_wake(sl_pool *p) {
-    pthread_mutex_lock(&p->lock);
-    atomic_store(&p->awake, 1);
-    pthread_cond_broadcast(&p->cv);
-    pthread_mutex_unlock(&p->lock);
-}
-
-void pool_sleep(sl_pool *p) { atomic_store(&p->awake, 0); }
-
 /* Workers only bump done after finishing a claimed chunk, so once done reaches count nobody still
    touches this job and the next one can be published. */
-void pool_run(sl_pool *p, sl_task_fn *task, int count, void *ctx) {
+void sl__pool_run(sl_pool *p, sl_task_fn *task, int count, void *ctx) {
     atomic_store(&p->task, task);
     atomic_store(&p->ctx, ctx);
     atomic_store(&p->done, 0);
     p->gen++;
     atomic_store(&p->work, JOB_PACK(p->gen, count));
+    /* Sleepers re-check for work under the lock, so a broadcast under it cannot be missed. */
+    if (atomic_load(&p->sleepers)) {
+        pthread_mutex_lock(&p->lock);
+        pthread_cond_broadcast(&p->cv);
+        pthread_mutex_unlock(&p->lock);
+    }
     take_chunks(p);
     for (int spins = 0; atomic_load(&p->done) < count;) if (++spins > 2000) { sched_yield(); spins = 0; } else SPIN_PAUSE();
 }

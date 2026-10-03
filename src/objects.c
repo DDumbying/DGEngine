@@ -14,7 +14,7 @@ static int spawn_into(sl_world *w, int obj, sl_material m, sl_vec3 pos) {
     object *o = &w->objects[obj];
     sl_particle id = sl_spawn(w, m, pos, v3(0, 0, 0));
     if (id < 0) return 0;
-    int s = slot_of(w, id);
+    int s = sl__slot_of(w, id);
     w->obj[s] = obj;
     w->flags[s] &= (unsigned char)~F_FLUID;
     o->ids[o->count++] = id;
@@ -29,10 +29,10 @@ static int add_dist(sl_world *w, int obj, int a, int b, float compliance) {
 }
 
 /* Same coloring as contacts, so each color of distance constraints runs in parallel. */
-void color_dist(sl_world *w) {
+void sl__color_dist(sl_world *w) {
     int fill[SL_MAX_COLORS + 2];
     if (!sl__grow(w, (void **)&w->dist_tmp, &w->dist_tmp_cap, w->dist_count + 1, sizeof(dist_con))
-        || !color_graph(w, (const int *)(void *)w->dist, (int)(sizeof(dist_con) / sizeof(int)), w->dist_count, w->dist_color_off)) {
+        || !sl__color_graph(w, (const int *)(void *)w->dist, (int)(sizeof(dist_con) / sizeof(int)), w->dist_count, w->dist_color_off)) {
         /* Without room to color, everything goes in the overflow color and runs on one thread. */
         memset(w->dist_color_off, 0, sizeof w->dist_color_off);
         w->dist_color_off[SL_MAX_COLORS + 1] = w->dist_count;
@@ -50,7 +50,7 @@ static int alloc_ids(sl_world *w, int obj, int n) {
 
 static sl_object finish(sl_world *w, int obj, int ok) {
     if (!ok) { sl_object_destroy(w, obj); return -1; }
-    color_dist(w);
+    sl__color_dist(w);
     w->mem_dirty = 1;
     w->need_rebuild = 1;
     return obj;
@@ -70,7 +70,7 @@ sl_object sl_rope_create(sl_world *w, sl_material m, sl_vec3 a, sl_vec3 b, float
     int ok = alloc_ids(w, obj, n);
     for (int i = 0; ok && i < n; i++) ok = spawn_into(w, obj, m, v3_lerp(a, b, (float)i / (float)(n - 1)));
     const sl_particle *ids = w->objects[obj].ids;
-    for (int i = 0; ok && i + 1 < n; i++) ok = add_dist(w, obj, slot_of(w, ids[i]), slot_of(w, ids[i + 1]), compliance);
+    for (int i = 0; ok && i + 1 < n; i++) ok = add_dist(w, obj, sl__slot_of(w, ids[i]), sl__slot_of(w, ids[i + 1]), compliance);
     return finish(w, obj, ok);
 }
 
@@ -91,7 +91,7 @@ sl_object sl_cloth_create(sl_world *w, sl_material m, sl_vec3 origin, sl_vec3 u,
         for (int i = 0; ok && i < nu; i++)
             ok = spawn_into(w, obj, m, v3_add(origin, v3_add(v3_scale(u, (float)i / (float)(nu - 1)), v3_scale(v, (float)j / (float)(nv - 1)))));
     const sl_particle *ids = w->objects[obj].ids;
-#define AT(i, j) slot_of(w, ids[(j) * nu + (i)])
+#define AT(i, j) sl__slot_of(w, ids[(j) * nu + (i)])
     for (int j = 0; ok && j < nv; j++)
         for (int i = 0; ok && i < nu; i++) {
             if (i + 1 < nu) ok = ok && add_dist(w, obj, AT(i, j), AT(i + 1, j), stretch_compliance);
@@ -156,7 +156,7 @@ sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec
                 for (int k = lo[2]; k <= hi[2]; k++)
                     for (int j = lo[1]; j <= hi[1]; j++)
                         for (int i = lo[0]; i <= hi[0]; i++) {
-                            int s = slot_of(w, ids[(k * n[1] + j) * n[0] + i]);
+                            int s = sl__slot_of(w, ids[(k * n[1] + j) * n[0] + i]);
                             w->members[w->member_count++] = (member){s, w->cluster_count - 1, w->x[s]};
                             center = v3_add(center, w->x[s]);
                         }
@@ -169,11 +169,11 @@ sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec
 void sl_object_destroy(sl_world *w, sl_object o) {
     if (!w || o < 0 || o >= w->object_count || w->objects[o].alive != 1) return;
     w->objects[o].alive = 2;
-    remove_doomed(w, NULL, 0);
+    sl__remove_doomed(w, NULL, 0);
 }
 
 /* Drops the object's constraints and record; its particles are removed by the caller. */
-void objects_drop(sl_world *w, int o) {
+void sl__objects_drop(sl_world *w, int o) {
     int n = 0;
     for (int k = 0; k < w->dist_count; k++) if (w->dist[k].obj != o) w->dist[n++] = w->dist[k];
     w->dist_count = n;
@@ -206,7 +206,7 @@ void sl_object_grid(const sl_world *w, sl_object o, int *nu, int *nv) {
     if (nv) *nv = ok ? w->objects[o].nv : 0;
 }
 
-void objects_remap(sl_world *w, const int *old_to_new) {
+void sl__objects_remap(sl_world *w, const int *old_to_new) {
     for (int k = 0; k < w->dist_count; k++) {
         w->dist[k].a = old_to_new[w->dist[k].a];
         w->dist[k].b = old_to_new[w->dist[k].b];
@@ -216,7 +216,7 @@ void objects_remap(sl_world *w, const int *old_to_new) {
 }
 
 /* For each slot, the cluster members that point at it, so shape matching can gather per particle. */
-int objects_membership(sl_world *w) {
+int sl__objects_membership(sl_world *w) {
     if (!sl__grow(w, (void **)&w->mem_list, &w->mem_list_cap, w->member_count + 1, sizeof(int))) return 0;
     for (int s = 0; s <= w->count; s++) w->mem_off[s] = 0;
     for (int m = 0; m < w->member_count; m++) w->mem_off[w->members[m].slot + 1]++;
@@ -227,7 +227,7 @@ int objects_membership(sl_world *w) {
     return 1;
 }
 
-void objects_substep(sl_world *w) {
+void sl__objects_substep(sl_world *w) {
     for (int k = 0; k < w->dist_count; k++) w->dist_lambda[k] = 0;
 }
 
@@ -311,8 +311,8 @@ static void match_particles(sl_world *w, int begin, int end, int chunk, void *ct
     }
 }
 
-void objects_solve(sl_world *w) {
-    run_colors(w, w->dist_color_off, solve_dist_range);
+void sl__objects_solve(sl_world *w) {
+    sl__run_colors(w, w->dist_color_off, solve_dist_range);
     if (w->cluster_count) {
         sl__parallel(w, w->cluster_count, match_clusters, NULL);
         sl__parallel(w, w->active_count, match_particles, NULL);
@@ -320,7 +320,7 @@ void objects_solve(sl_world *w) {
 }
 
 /* Plastic clusters adopt part of any large deformation as their new rest shape. */
-void objects_plasticity(sl_world *w) {
+void sl__objects_plasticity(sl_world *w) {
     float yield = 0.1f * w->spacing;
     for (int c = 0; c < w->cluster_count; c++) {
         cluster *cl = &w->clusters[c];

@@ -80,7 +80,7 @@ static void aniso_range(sl_world *w, int begin, int end, int chunk, void *ctx) {
 }
 
 /* Sleeping particles keep the shape they had; it moves with them when memory is reordered. */
-void anisotropy_step(sl_world *w) { sl__parallel(w, w->active_count, aniso_range, NULL); }
+void sl__anisotropy_step(sl_world *w) { sl__parallel(w, w->active_count, aniso_range, NULL); }
 
 static unsigned hash3(unsigned a, unsigned b, unsigned c) {
     unsigned h = a * 0x9e3779b1u ^ b * 0x85ebca77u ^ c * 0xc2b2ae3du;
@@ -140,7 +140,7 @@ static void move_diffuse(sl_world *w, int begin, int end, int chunk, void *ctx) 
     sl_vec3 up = v3_len(w->gravity) > 0 ? v3_scale(w->gravity, -1.0f / v3_len(w->gravity)) : v3(0, 1, 0);
     for (int d = begin; d < end; d++) {
         sl_vec3 avg;
-        int n = grid_fluid_near(w, w->dpos[d], &avg);
+        int n = sl__grid_fluid_near(w, w->dpos[d], &avg);
         unsigned char kind = n < 6 ? SL_SPRAY : (n < 20 ? SL_FOAM : SL_BUBBLE);
         w->dkind[d] = kind;
         if (kind == SL_SPRAY) {
@@ -157,7 +157,7 @@ static void move_diffuse(sl_world *w, int begin, int end, int chunk, void *ctx) 
         for (int c = 0; c < w->collider_count; c++) {
             if (!w->colliders[c].enabled) continue;
             sl_vec3 nrm;
-            float dist = collider_distance(&w->colliders[c], w->dpos[d], &nrm);
+            float dist = sl__collider_distance(&w->colliders[c], w->dpos[d], &nrm);
             if (dist < 0) {
                 w->dpos[d] = v3_madd(w->dpos[d], nrm, -dist);
                 float vn = v3_dot(w->dvel[d], nrm);
@@ -168,7 +168,7 @@ static void move_diffuse(sl_world *w, int begin, int end, int chunk, void *ctx) 
     }
 }
 
-void diffuse_step(sl_world *w) {
+void sl__diffuse_step(sl_world *w) {
     sl__parallel(w, w->diffuse_count, move_diffuse, NULL);
     int n = 0;
     for (int d = 0; d < w->diffuse_count; d++) {

@@ -9,6 +9,9 @@
 #define SL_WALL_SAMPLES 64
 #define SL_MAX_COLORS 64
 #define SL_CALM_STEPS 30
+#define SL_MAX_WAKES 32
+#define SL_PUSH_SLOTS 4   /* colliders one particle can load at once */
+_Static_assert(SL_PUSH_SLOTS <= sizeof(int), "reorder moves push ids through an int per slot");
 
 enum { F_FLUID = 1, F_PINNED = 2, F_TOUCH = 4, F_AWAKE = 8, F_WET = 16, F_GRAB = 32 };
 #define F_KINEMATIC (F_PINNED | F_GRAB)   /* moved only by the user, never by the solver */
@@ -68,9 +71,9 @@ struct sl_world {
 
     /* per slot */
     sl_vec3 *x, *p, *v, *x_step, *x_build, *delta, *tmp;
-    sl_vec3 *push;               /* per slot, 2 entries: impulse given to colliders last awake step */
+    sl_vec3 *push;               /* SL_PUSH_SLOTS per slot: impulse given to colliders last awake step */
     float *lambda, *inv_mass, *mass;
-    unsigned char *flags, *calm, *mat, *wet, *near_fluid, *mark, *push_id;   /* push_id: 2 per slot, collider + 1 or 0 */
+    unsigned char *flags, *calm, *mat, *wet, *near_fluid, *mark, *push_id;   /* push_id: SL_PUSH_SLOTS per slot, collider + 1 or 0 */
     sl_vec3 *aniso;              /* 4 per slot when enabled: center, then three axes */
     int *id, *obj, *island, *order;
     sl_material *material;       /* mat widened to the public type, so sl_materials can hand it out */
@@ -113,6 +116,9 @@ struct sl_world {
     grab grabs[SL_MAX_GRABS];
     int grab_count;
 
+    struct { sl_vec3 lo, hi; } wakes[SL_MAX_WAKES];   /* boxes to wake at the next step; wake_all once they run out */
+    int wake_count, wake_all;
+
     int use_aniso, max_diffuse, diffuse_count;
     unsigned step_count;
     sl_vec3 *dpos, *dvel;
@@ -146,46 +152,44 @@ void sl__parallel(sl_world *w, int count, sl_range_fn fn, void *ctx);
 /* Any chunk size, for passes whose result does not depend on how the work is split. */
 void sl__parallel_sized(sl_world *w, int count, int size, sl_range_fn fn, void *ctx);
 int sl__chunks(int count);
-sl_pool *pool_create(sl_world *w, int threads);
-void pool_destroy(sl_world *w, sl_pool *p);
-void pool_wake(sl_pool *p);
-void pool_sleep(sl_pool *p);
-void pool_run(sl_pool *p, sl_task_fn *task, int count, void *ctx);
+sl_pool *sl__pool_create(sl_world *w, int threads);
+void sl__pool_destroy(sl_world *w, sl_pool *p);
+void sl__pool_run(sl_pool *p, sl_task_fn *task, int count, void *ctx);
 
 static inline float kernel(float r, float h) { return r < h ? (h - r) * (h - r) * (h - r) : 0.0f; }
 static inline float kernel_grad(float r, float h) { return r < h ? -3.0f * (h - r) * (h - r) : 0.0f; }
 
 static inline int id_index(const sl_world *w, sl_particle p) { return (int)((unsigned)p & ((1u << w->id_bits) - 1u)); }
-int slot_of(const sl_world *w, sl_particle p);
-float bound_radius(const sl_collider_desc *d);
-int remove_doomed(sl_world *w, const sl_vec3 *center, float radius);
-int color_graph(sl_world *w, const int *ends, int stride, int count, int *offsets);
-void run_colors(sl_world *w, const int *offsets, sl_range_fn fn);
+int sl__slot_of(const sl_world *w, sl_particle p);
+float sl__bound_radius(const sl_collider_desc *d);
+int sl__remove_doomed(sl_world *w, const sl_vec3 *center, float radius);
+int sl__color_graph(sl_world *w, const int *ends, int stride, int count, int *offsets);
+void sl__run_colors(sl_world *w, const int *offsets, sl_range_fn fn);
 
 /* grid and neighbors */
-int grid_rebuild(sl_world *w, int step_start);   /* step_start: also reorder memory and decide who sleeps */
-void settle_islands(sl_world *w);
+int sl__grid_rebuild(sl_world *w, int step_start);   /* step_start: also reorder memory and decide who sleeps */
+void sl__settle_islands(sl_world *w);
 
 /* solver passes */
-void collider_frames(sl_world *w, float t);
-void wall_table_init(sl_world *w);
-float wall_density(sl_world *w, int i, sl_vec3 *grad, float scale);
-void book_push(sl_world *w, int i, int collider, sl_vec3 impulse);
-void solve_colliders(sl_world *w);
-void solve_substep(sl_world *w, float t);
-void stabilize(sl_world *w);
-void move_grabs(sl_world *w, float t);
-void fluid_step(sl_world *w);
-void anisotropy_step(sl_world *w);
-void diffuse_step(sl_world *w);
-int grid_fluid_near(sl_world *w, sl_vec3 x, sl_vec3 *avg_vel);
-float collider_distance(const collider *col, sl_vec3 p, sl_vec3 *n);
-void objects_substep(sl_world *w);
-void objects_solve(sl_world *w);
-void objects_plasticity(sl_world *w);
-void objects_remap(sl_world *w, const int *old_to_new);
-void objects_drop(sl_world *w, int obj);
-void color_dist(sl_world *w);
-int objects_membership(sl_world *w);
+void sl__collider_frames(sl_world *w, float t);
+void sl__wall_table_init(sl_world *w);
+float sl__wall_density(sl_world *w, int i, sl_vec3 *grad, float scale);
+void sl__book_push(sl_world *w, int i, int collider, sl_vec3 impulse);
+void sl__solve_colliders(sl_world *w);
+void sl__solve_substep(sl_world *w, float t);
+void sl__stabilize(sl_world *w);
+void sl__move_grabs(sl_world *w, float t);
+void sl__fluid_step(sl_world *w);
+void sl__anisotropy_step(sl_world *w);
+void sl__diffuse_step(sl_world *w);
+int sl__grid_fluid_near(sl_world *w, sl_vec3 x, sl_vec3 *avg_vel);
+float sl__collider_distance(const collider *col, sl_vec3 p, sl_vec3 *n);
+void sl__objects_substep(sl_world *w);
+void sl__objects_solve(sl_world *w);
+void sl__objects_plasticity(sl_world *w);
+void sl__objects_remap(sl_world *w, const int *old_to_new);
+void sl__objects_drop(sl_world *w, int obj);
+void sl__color_dist(sl_world *w);
+int sl__objects_membership(sl_world *w);
 
 #endif
