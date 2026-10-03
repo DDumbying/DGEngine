@@ -1,7 +1,11 @@
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "slime/slime.h"
 
 static int failures, checks;
@@ -826,7 +830,8 @@ static int brute_pairs(const sl_vec3 *p, int n, float range) {
 }
 
 static void test_neighbor_search(void) {
-    for (int c = 0; c < 2; c++) {
+    static const char *names[] = {"dense", "hash", "far pair", "huge coordinate"};
+    for (int c = 0; c < 4; c++) {
         sl_world_desc d = {0};
         d.max_particles = 4000;
         d.particle_radius = R;
@@ -835,13 +840,22 @@ static void test_neighbor_search(void) {
         sl_material m = sand(w);
         unsigned seed = 12345u;
         /* A jittered lattice with no overlaps, so nothing moves during the tiny step; a far copy forces the hash grid. */
-        for (int copy = 0; copy <= c; copy++)
+        for (int copy = 0; copy <= (c == 1); copy++)
             for (int i = 0; i < 1331; i++) {
                 float q[3];
                 for (int a = 0; a < 3; a++) { seed = seed * 1664525u + 1013904223u; q[a] = ((float)(seed >> 8) / 16777216.0f - 0.5f) * 0.008f; }
                 sl_spawn(w, m, (sl_vec3){0.11f * (float)(i % 11) + q[0] + 80.0f * (float)copy, 0.11f * (float)(i / 11 % 11) + q[1], 0.11f * (float)(i / 121) + q[2]},
                          (sl_vec3){0, 0, 0});
             }
+        /* A couple of strays far from the lattice must still find each other, and huge coordinates must not overflow. */
+        if (c == 2) {
+            sl_spawn(w, m, (sl_vec3){500, 0, 0}, (sl_vec3){0, 0, 0});
+            sl_spawn(w, m, (sl_vec3){500.11f, 0, 0}, (sl_vec3){0, 0, 0});
+        }
+        if (c == 3) {
+            sl_spawn(w, m, (sl_vec3){3e9f, 0, 0}, (sl_vec3){0, 0, 0});
+            sl_spawn(w, m, (sl_vec3){0, -3e9f, 0}, (sl_vec3){0, 0, 0});
+        }
         static sl_vec3 before[4000];
         int n = sl_count(w);
         for (int i = 0; i < n; i++) before[i] = sl_positions(w)[i];
@@ -849,7 +863,7 @@ static void test_neighbor_search(void) {
         sl_stats st;
         sl_get_stats(w, &st);
         int want = brute_pairs(before, n, 2 * R * 2.1f);
-        CHECK(st.pairs == want && st.rebuilds == 1, "%s grid found %d pairs, brute force %d", c ? "hash" : "dense", st.pairs, want);
+        CHECK(st.pairs == want && st.rebuilds == 1, "%s: grid found %d pairs, brute force %d", names[c], st.pairs, want);
         sl_world_destroy(w);
     }
 }
@@ -977,6 +991,184 @@ static void test_validation(void) {
     sl_world_destroy(w);
 }
 
+static double wall_now(void) {
+    struct timespec t;
+    timespec_get(&t, TIME_UTC);
+    return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
+}
+
+static sl_world *sleeping_pile(int max) {
+    sl_world *w = make_world(max);
+    add_floor(w, 0.6f);
+    sl_spawn_box(w, sand(w), (sl_vec3){-0.3f, 0.0f, -0.3f}, (sl_vec3){0.3f, 0.3f, 0.3f});
+    steps(w, 300);
+    return w;
+}
+
+/* Moving particles and toggling colliders costs the same however many particles the world holds. */
+static void test_cheap_edits(void) {
+    sl_world *w = make_world(20000);
+    sl_material m = sand(w);
+    sl_spawn_box(w, m, (sl_vec3){-1, 0, -1}, (sl_vec3){1, 5, 1});
+    sl_collider plane = sl_collider_add(w, &(sl_collider_desc){.shape = SL_PLANE});
+    const sl_particle *ids = sl_ids(w);
+    int n = sl_count(w);
+    double t = wall_now();
+    for (int k = 0; k < 5000; k++) sl_set_position(w, ids[k % n], sl_position(w, ids[k % n]));
+    double moves = wall_now() - t;
+    t = wall_now();
+    for (int k = 0; k < 4000; k++) sl_collider_set_enabled(w, plane, k & 1);
+    double toggles = wall_now() - t;
+    CHECK(moves < 0.01, "5000 sl_set_position calls on %d particles took %.1f ms", n, moves * 1000);
+    CHECK(toggles < 0.01, "4000 collider toggles on %d particles took %.1f ms", n, toggles * 1000);
+    sl_world_destroy(w);
+}
+
+/* Edits still wake what they touch, even though the waking happens at the next step. */
+static void test_edits_wake(void) {
+    sl_world *w = sleeping_pile(3000);
+    sl_stats st;
+    sl_get_stats(w, &st);
+    CHECK(st.awake == 0, "pile did not sleep, test does not apply");
+    sl_particle p = sl_spawn(w, sand(w), (sl_vec3){3, 0.05f, 0}, (sl_vec3){0, 0, 0});
+    steps(w, 60);
+    sl_vec3 inside = sl_positions(w)[0];   /* any pile particle */
+    for (int s = 0; s < sl_count(w); s++) if (sl_ids(w)[s] != p) { inside = sl_positions(w)[s]; break; }
+    sl_set_position(w, p, (sl_vec3){inside.x + 0.01f, inside.y, inside.z});
+    sl_step(w, DT);
+    sl_get_stats(w, &st);
+    CHECK(st.awake > 0, "a particle moved into a sleeping pile did not wake it");
+    sl_world_destroy(w);
+
+    w = sleeping_pile(3000);
+    sl_collider ball = sl_collider_add(w, &(sl_collider_desc){.shape = SL_SPHERE, .radius = 0.15f, .position = {0, 0.15f, 0}});
+    steps(w, 30);
+    int stuck = 0;
+    for (int s = 0; s < sl_count(w); s++) stuck += dist(sl_positions(w)[s], (sl_vec3){0, 0.15f, 0}) < 0.15f;
+    CHECK(ball >= 0 && stuck == 0, "%d particles left inside a ball added into a sleeping pile", stuck);
+    sl_world_destroy(w);
+}
+
+/* A grain pressed into a corner made of three boxes loads all three; together they carry its whole weight. */
+static void test_force_three_colliders(void) {
+    sl_world_desc d = {0};
+    d.max_particles = 10;
+    d.particle_radius = R;
+    d.gravity = (sl_vec3){-5, -5, -5};
+    sl_world *w = sl_world_create(&d);
+    sl_vec3 centers[3] = {{0.5f, -0.5f, 0.5f}, {-0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, -0.5f}};
+    sl_collider c[3];
+    for (int k = 0; k < 3; k++)
+        c[k] = sl_collider_add(w, &(sl_collider_desc){.shape = SL_BOX, .position = centers[k], .half_extents = {0.5f, 0.5f, 0.5f}});
+    sl_spawn(w, sand(w), (sl_vec3){R, R, R}, (sl_vec3){0, 0, 0});
+    steps(w, 120);
+    float mass = 1600 * (2 * R) * (2 * R) * (2 * R);
+    sl_vec3 total = {0, 0, 0};
+    for (int k = 0; k < 3; k++) {
+        sl_vec3 f = sl_collider_force(w, c[k]);
+        CHECK(fabsf(f.x) + fabsf(f.y) + fabsf(f.z) > 0.2f * 5 * mass, "box %d carries no load", k);
+        total.x += f.x; total.y += f.y; total.z += f.z;
+    }
+    sl_vec3 weight = {-5 * mass, -5 * mass, -5 * mass};
+    CHECK(dist(total, weight) < 0.1f * 5 * mass, "boxes carry (%f, %f, %f), weight is (%f, %f, %f)",
+          total.x, total.y, total.z, weight.x, weight.y, weight.z);
+    sl_world_destroy(w);
+}
+
+/* One stray particle far away must not slow down the whole world. */
+static double water_step_ms(int stray) {
+    double best = 1e9;
+    for (int rep = 0; rep < 3; rep++) {
+        sl_world_desc d = {0};
+        d.max_particles = 20000;
+        d.particle_radius = R;
+        d.gravity = (sl_vec3){0, -9.81f, 0};
+        d.sleep_speed = -1;
+        sl_world *w = sl_world_create(&d);
+        sl_material m = water(w);
+        add_floor(w, 0.5f);
+        sl_spawn_box(w, m, (sl_vec3){-1, 0, -1}, (sl_vec3){1, 0.5f, 1});
+        if (stray) sl_spawn(w, m, (sl_vec3){500, R, 0}, (sl_vec3){0, 0, 0});
+        steps(w, 20);
+        double t = wall_now();
+        steps(w, 30);
+        t = (wall_now() - t) / 30;
+        if (t < best) best = t;
+        sl_world_destroy(w);
+    }
+    return best * 1000;
+}
+
+/* Worlds smaller than the per-chunk scratch must still step (this overran a buffer under AddressSanitizer). */
+static void test_tiny_world(void) {
+    for (int max = 1; max <= 3; max++) {
+        sl_world *w = make_world(max);
+        sl_material m = sand(w);
+        add_floor(w, 0.5f);
+        for (int k = 0; k < max; k++) sl_spawn(w, m, (sl_vec3){0.2f * (float)k, 0.5f, 0}, (sl_vec3){0, 0, 0});
+        steps(w, 60);
+        CHECK(sl_count(w) == max && all_finite(w) && max_height(w) < 0.1f, "world of %d did not settle", max);
+        sl_world_destroy(w);
+    }
+}
+
+static void test_stray_particle_speed(void) {
+    double normal = water_step_ms(0), stray = water_step_ms(1);
+    CHECK(stray < 1.2 * normal, "one far particle made steps %.2f ms instead of %.2f ms", stray, normal);
+}
+
+#ifndef _WIN32
+/* Idle workers must not burn a core each while the main thread is busy alone: the allocator below stalls the main
+   thread for 200 ms inside a step, a stand-in for a long serial phase, and the process CPU time is measured. */
+static int stall_next;
+static void *stalling_alloc(size_t size, void *user) {
+    (void)user;
+    if (stall_next) { stall_next = 0; nanosleep(&(struct timespec){0, 200000000}, NULL); }
+    return malloc(size);
+}
+static void plain_free(void *ptr, void *user) { (void)user; free(ptr); }
+static double clock_seconds(clockid_t id) {
+    struct timespec t;
+    clock_gettime(id, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
+}
+static double cpu_seconds(void) { return clock_seconds(CLOCK_PROCESS_CPUTIME_ID); }
+
+static void test_idle_workers_block(void) {
+    sl_world_desc d = {0};
+    d.max_particles = 20000;
+    d.particle_radius = R;
+    d.gravity = (sl_vec3){0, -9.81f, 0};
+    d.workers = 4;
+    d.allocator = (sl_allocator){stalling_alloc, plain_free, NULL};
+    sl_world *w = sl_world_create(&d);
+    add_container(w, (sl_vec3){0.5f, 0.8f, 0.5f});
+    sl_spawn_box(w, water(w), (sl_vec3){-0.5f, -0.8f, -0.5f}, (sl_vec3){0.5f, -0.4f, 0.5f});
+    stall_next = 1;   /* the first step allocates its grid after a parallel pass has run */
+    double cpu = cpu_seconds();
+    sl_step(w, DT);
+    cpu = cpu_seconds() - cpu;
+    CHECK(!stall_next, "the step allocated nothing, test does not apply");
+    CHECK(cpu < 0.1, "workers burned %.0f ms of CPU while the main thread stalled 200 ms", cpu * 1000);
+
+    /* A world that is fully asleep must not wake the pool at all. */
+    sl_clear(w);
+    add_floor(w, 0.6f);
+    sl_spawn_box(w, sand(w), (sl_vec3){-0.3f, 0.0f, -0.3f}, (sl_vec3){0.3f, 0.3f, 0.3f});
+    steps(w, 300);
+    sl_stats st;
+    sl_get_stats(w, &st);
+    CHECK(st.awake == 0, "pile did not sleep, test does not apply");
+    cpu = cpu_seconds();
+    double wall = clock_seconds(CLOCK_MONOTONIC);
+    for (int i = 0; i < 2000; i++) sl_step(w, DT);
+    cpu = cpu_seconds() - cpu;
+    wall = clock_seconds(CLOCK_MONOTONIC) - wall;
+    CHECK(cpu < 1.5 * wall + 0.005, "a sleeping world used %.1f ms CPU in %.1f ms", cpu * 1000, wall * 1000);
+    sl_world_destroy(w);
+}
+#endif
+
 typedef struct { const char *name; void (*fn)(void); } test;
 
 int main(int argc, char **argv) {
@@ -1022,6 +1214,14 @@ int main(int argc, char **argv) {
         {"stale ids", test_stale_ids},
         {"plane rotation", test_plane_rotation},
         {"validation", test_validation},
+        {"cheap edits", test_cheap_edits},
+        {"edits wake", test_edits_wake},
+        {"force on three colliders", test_force_three_colliders},
+        {"stray particle speed", test_stray_particle_speed},
+        {"tiny world", test_tiny_world},
+#ifndef _WIN32
+        {"idle workers block", test_idle_workers_block},
+#endif
     };
     for (size_t i = 0; i < sizeof tests / sizeof tests[0]; i++) {
         if (argc > 1 && !strstr(tests[i].name, argv[1])) continue;

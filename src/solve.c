@@ -21,7 +21,7 @@ static void fluid_lambda(sl_world *w, int begin, int end, int chunk, void *ctx) 
         w->lambda[i] = 0;
         if (!(w->flags[i] & F_FLUID)) continue;
         sl_vec3 grad_i, pi = w->p[i];
-        float rho = kernel(0, h) + wall_density(w, i, &grad_i, 0), grad2 = 0;
+        float rho = kernel(0, h) + sl__wall_density(w, i, &grad_i, 0), grad2 = 0;
         grad_i = v3_scale(grad_i, inv_rest);
         int in = w->nbr_off[i];
         for (int n = in; n < w->nbr_off[i + 1]; n++) {
@@ -73,7 +73,7 @@ static void fluid_delta(sl_world *w, int begin, int end, int chunk, void *ctx) {
             float li = w->lambda[i];
             if (li != 0) {
                 sl_vec3 wall;
-                wall_density(w, i, &wall, li * inv_rest * w->mass[i] / w->hs);
+                sl__wall_density(w, i, &wall, li * inv_rest * w->mass[i] / w->hs);
                 dp = v3_scale(wall, li * inv_rest);
             }
             for (int n = w->nbr_off[i]; n < w->order[i]; n++) {
@@ -164,7 +164,7 @@ static void stabilize_range(sl_world *w, int begin, int end, int chunk, void *ct
 
 /* Runs fn over each color in turn; ctx is the color's first index. Nothing in a color shares a particle,
    so small chunks spread even short colors over every thread. The overflow color runs on one thread. */
-void run_colors(sl_world *w, const int *offsets, sl_range_fn fn) {
+void sl__run_colors(sl_world *w, const int *offsets, sl_range_fn fn) {
     for (int color = 0; color <= SL_MAX_COLORS; color++) {
         int base = offsets[color], count = offsets[color + 1] - base;
         if (count <= 0) continue;
@@ -173,7 +173,7 @@ void run_colors(sl_world *w, const int *offsets, sl_range_fn fn) {
     }
 }
 
-void stabilize(sl_world *w) { run_colors(w, w->color_off, stabilize_range); }
+void sl__stabilize(sl_world *w) { sl__run_colors(w, w->color_off, stabilize_range); }
 
 static void update_velocities(sl_world *w, int begin, int end, int chunk, void *ctx) {
     (void)chunk; (void)ctx;
@@ -251,20 +251,20 @@ static void copy_velocity(sl_world *w, int begin, int end, int chunk, void *ctx)
 }
 
 /* Grabbed particles sweep from last step's target to the new one, so they move smoothly and can be thrown. */
-void move_grabs(sl_world *w, float t) {
+void sl__move_grabs(sl_world *w, float t) {
     for (int g = 0; g < w->grab_count; g++) {
-        int s = slot_of(w, w->grabs[g].id);
+        int s = sl__slot_of(w, w->grabs[g].id);
         if (s >= 0) w->p[s] = v3_lerp(w->grabs[g].from, w->grabs[g].to, t);
     }
 }
 
-void solve_substep(sl_world *w, float t) {
+void sl__solve_substep(sl_world *w, float t) {
     int n = w->active_count;
-    PROF(P_PREDICT, collider_frames(w, t); sl__parallel(w, n, predict, NULL); move_grabs(w, t));
+    PROF(P_PREDICT, sl__collider_frames(w, t); sl__parallel(w, n, predict, NULL); sl__move_grabs(w, t));
 
     int fluids = 0;
     for (int m = 0; m < w->material_count; m++) fluids |= w->materials[m].kind == SL_FLUID;
-    objects_substep(w);
+    sl__objects_substep(w);
     for (int it = 0; fluids && it < w->fluid_iterations; it++) {
         PROF(P_LAMBDA, sl__parallel(w, n, fluid_lambda, NULL));
         PROF(P_DELTA, sl__parallel(w, n, fluid_delta, NULL));
@@ -273,14 +273,14 @@ void solve_substep(sl_world *w, float t) {
     /* Without grain contacts or objects there is nothing to iterate, so colliders need a single pass. */
     int passes = w->contact_count || w->dist_count || w->cluster_count ? w->iterations : 1;
     for (int k = 0; k < passes; k++) {
-        PROF(P_SOLIDS, run_colors(w, w->color_off, solve_contact_range));
-        PROF(P_OBJECTS, objects_solve(w));
-        PROF(P_COLLIDERS, solve_colliders(w));
+        PROF(P_SOLIDS, sl__run_colors(w, w->color_off, solve_contact_range));
+        PROF(P_OBJECTS, sl__objects_solve(w));
+        PROF(P_COLLIDERS, sl__solve_colliders(w));
     }
     PROF(P_VELOCITY, sl__parallel(w, n, update_velocities, NULL));
 }
 
-void fluid_step(sl_world *w) {
+void sl__fluid_step(sl_world *w) {
     int extras = 0, vort = 0, n = w->active_count;
     float visc_step[SL_MAX_MATERIALS];
     for (int m = 0; m < w->material_count; m++) {

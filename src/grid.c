@@ -1,7 +1,18 @@
 #include <string.h>
 #include "internal.h"
 
-static int cell_coord(float x, float cell) { return (int)floorf(x / cell); }
+/* Hash cell coordinate, clamped so huge positions cannot overflow an int; clamping never moves two points
+   further apart in cells, so neighbors still sit in adjacent cells. */
+static int cell_coord(float x, float cell) {
+    float f = floorf(x / cell);
+    return f >= 1e9f ? 1000000000 : (f >= -1e9f ? (int)f : -1000000000);
+}
+
+/* Dense cell along one axis; strays outside the grid box land in its border cells, by the same argument. */
+static int dense_coord(float x, float origin, float cell, int n) {
+    float f = floorf((x - origin) / cell);
+    return f >= (float)(n - 1) ? n - 1 : (f >= 0 ? (int)f : 0);
+}
 
 static int hash_cell(int x, int y, int z, int mask) {
     unsigned h = (unsigned)x * 92837111u ^ (unsigned)y * 689287499u ^ (unsigned)z * 283923481u;
@@ -24,46 +35,94 @@ static int hash_buckets(const grid *g, sl_vec3 x, int *buckets) {
 
 static int cell_of(const grid *g, sl_vec3 x) {
     if (g->dense) {
-        int ix = (int)((x.x - g->origin.x) / g->cell), iy = (int)((x.y - g->origin.y) / g->cell), iz = (int)((x.z - g->origin.z) / g->cell);
-        return ix + g->nx * (iy + g->ny * iz);
+        int ix = dense_coord(x.x, g->origin.x, g->cell, g->nx), iy = dense_coord(x.y, g->origin.y, g->cell, g->ny);
+        return ix + g->nx * (iy + g->ny * dense_coord(x.z, g->origin.z, g->cell, g->nz));
     }
     return hash_cell(cell_coord(x.x, g->cell), cell_coord(x.y, g->cell), cell_coord(x.z, g->cell), g->table_size - 1);
 }
 
-/* Bounds of each chunk, kept in tmp until they are merged. */
+/* Bounds and position sum of each chunk, kept in tmp until they are merged. */
 static void chunk_bounds(sl_world *w, int begin, int end, int chunk, void *ctx) {
     (void)ctx;
-    sl_vec3 lo = w->x[begin], hi = w->x[begin];
+    sl_vec3 lo = w->x[begin], hi = w->x[begin], sum = w->x[begin];
     for (int s = begin + 1; s < end; s++) {
         sl_vec3 x = w->x[s];
         lo = v3(fminf(lo.x, x.x), fminf(lo.y, x.y), fminf(lo.z, x.z));
         hi = v3(fmaxf(hi.x, x.x), fmaxf(hi.y, x.y), fmaxf(hi.z, x.z));
+        sum = v3_add(sum, x);
     }
-    w->tmp[2 * chunk] = lo;
-    w->tmp[2 * chunk + 1] = hi;
+    w->tmp[3 * chunk] = lo;
+    w->tmp[3 * chunk + 1] = hi;
+    w->tmp[3 * chunk + 2] = sum;
 }
 
-/* Dense grid over the particle bounds when it stays small, which keeps neighbor cells close in memory. */
+static void count_outside(sl_world *w, int begin, int end, int chunk, void *ctx) {
+    const sl_vec3 *box = ctx;
+    int n = 0;
+    for (int s = begin; s < end; s++) {
+        sl_vec3 x = w->x[s];
+        n += x.x < box[0].x || x.y < box[0].y || x.z < box[0].z || x.x > box[1].x || x.y > box[1].y || x.z > box[1].z;
+    }
+    w->chunk_buf[chunk] = n;
+}
+
+/* Cells per axis that fit the budget, shrinking the longest axes first. */
+static void fit_cells(double n[3], double budget) {
+    int order[3] = {0, 1, 2};
+    for (int i = 0; i < 2; i++)
+        for (int j = i + 1; j < 3; j++)
+            if (n[order[j]] < n[order[i]]) { int t = order[i]; order[i] = order[j]; order[j] = t; }
+    for (int k = 0; k < 3; k++) {
+        double limit = floor(pow(budget, 1.0 / (3 - k)));
+        if (limit < 1) limit = 1;
+        if (n[order[k]] > limit) n[order[k]] = limit;
+        budget /= n[order[k]];
+    }
+}
+
+/* Dense grid when it stays small, which keeps neighbor cells close in memory. When a few strays stretch the
+   bounds, the dense box covers the bulk around the centroid and the strays share its border cells; only a
+   world that is truly spread out falls back to the hash table. */
 static int setup_grid(sl_world *w) {
     grid *g = &w->g;
+    int chunks = sl__chunks(w->count);
+    if (!sl__grow(w, (void **)&w->chunk_buf, &w->chunk_cap, chunks + 1, sizeof(int))) return 0;
     sl__parallel(w, w->count, chunk_bounds, NULL);
-    sl_vec3 lo = w->tmp[0], hi = w->tmp[1];
-    for (int c = 1; c < sl__chunks(w->count); c++) {
-        sl_vec3 a = w->tmp[2 * c], b = w->tmp[2 * c + 1];
+    sl_vec3 lo = w->tmp[0], hi = w->tmp[1], sum = w->tmp[2];
+    for (int c = 1; c < chunks; c++) {
+        sl_vec3 a = w->tmp[3 * c], b = w->tmp[3 * c + 1];
         lo = v3(fminf(lo.x, a.x), fminf(lo.y, a.y), fminf(lo.z, a.z));
         hi = v3(fmaxf(hi.x, b.x), fmaxf(hi.y, b.y), fmaxf(hi.z, b.z));
+        sum = v3_add(sum, w->tmp[3 * c + 2]);
     }
     /* Dense cells are half the search range and scanned 5 wide, which tests far fewer far-off particles. */
     float range = w->h + w->skin, cell = 0.5f * range;
-    double nx = floor((hi.x - lo.x) / cell) + 1, ny = floor((hi.y - lo.y) / cell) + 1, nz = floor((hi.z - lo.z) / cell) + 1;
-    double cells = nx * ny * nz;
-    g->dense = cells <= 16.0 * w->count + 4096;
-    g->cell = g->dense ? cell : range;
-    g->span = g->dense ? 2 : 1;
-    if (g->dense) {
-        g->origin = lo;
-        g->nx = (int)nx; g->ny = (int)ny; g->nz = (int)nz;
-        g->cells = (int)cells;
+    double n[3] = {floor((hi.x - lo.x) / cell) + 1, floor((hi.y - lo.y) / cell) + 1, floor((hi.z - lo.z) / cell) + 1};
+    double budget = 16.0 * w->count + 4096;
+    sl_vec3 origin = lo;
+    int dense = n[0] * n[1] * n[2] <= budget;
+    if (!dense && v3_finite(lo) && v3_finite(hi)) {
+        fit_cells(n, budget);
+        sl_vec3 mean = v3_scale(sum, 1.0f / (float)w->count);
+        float *o = &origin.x;
+        const float *m = &mean.x, *l = &lo.x, *h = &hi.x;
+        for (int a = 0; a < 3; a++) {
+            float width = (float)n[a] * cell;
+            o[a] = fmaxf(l[a], fminf(m[a] - 0.5f * width, h[a] - width));
+        }
+        sl_vec3 box[2] = {origin, v3(origin.x + (float)n[0] * cell, origin.y + (float)n[1] * cell, origin.z + (float)n[2] * cell)};
+        sl__parallel(w, w->count, count_outside, box);
+        int outside = 0;
+        for (int c = 0; c < chunks; c++) outside += w->chunk_buf[c];
+        dense = outside <= w->count / 32;
+    }
+    g->dense = dense;
+    g->cell = dense ? cell : range;
+    g->span = dense ? 2 : 1;
+    if (dense) {
+        g->origin = origin;
+        g->nx = (int)n[0]; g->ny = (int)n[1]; g->nz = (int)n[2];
+        g->cells = g->nx * g->ny * g->nz;
     } else {
         g->cells = g->table_size;
     }
@@ -113,19 +172,19 @@ static void reorder(sl_world *w) {
         for (int k = 0; k < n; k++) bytes[k] = barr[a][g->sorted[k]];
         memcpy(barr[a], bytes, (size_t)n);
     }
-    unsigned short *pairs16 = (unsigned short *)(void *)g->bucket, *ids16 = (unsigned short *)(void *)w->push_id;
-    for (int k = 0; k < n; k++) pairs16[k] = ids16[g->sorted[k]];
-    memcpy(ids16, pairs16, (size_t)n * 2);
-    for (int half = 0; half < 2; half++) {
-        for (int k = 0; k < n; k++) w->tmp[k] = w->push[2 * g->sorted[k] + half];
-        for (int k = 0; k < n; k++) w->push[2 * k + half] = w->tmp[k];
+    /* push_id is SL_PUSH_SLOTS bytes per slot, which fits the int per slot in bucket. */
+    for (int k = 0; k < n; k++) memcpy(bytes + SL_PUSH_SLOTS * k, w->push_id + SL_PUSH_SLOTS * g->sorted[k], SL_PUSH_SLOTS);
+    memcpy(w->push_id, bytes, (size_t)n * SL_PUSH_SLOTS);
+    for (int q = 0; q < SL_PUSH_SLOTS; q++) {
+        for (int k = 0; k < n; k++) w->tmp[k] = w->push[SL_PUSH_SLOTS * g->sorted[k] + q];
+        for (int k = 0; k < n; k++) w->push[SL_PUSH_SLOTS * k + q] = w->tmp[k];
     }
     for (int q = 0; w->use_aniso && q < 4; q++) {
         for (int k = 0; k < n; k++) w->tmp[k] = w->aniso[4 * g->sorted[k] + q];
         for (int k = 0; k < n; k++) w->aniso[4 * k + q] = w->tmp[k];
     }
     for (int k = 0; k < n; k++) { w->id_slot[id_index(w, w->id[k])] = k; g->bucket[g->sorted[k]] = k; }
-    objects_remap(w, g->bucket);
+    sl__objects_remap(w, g->bucket);
     for (int k = 0; k < n; k++) g->sorted[k] = k;
 }
 
@@ -138,7 +197,8 @@ static int scan_cells(const sl_world *w, const sl_vec3 *xs, int s, int *out, int
     int n = 0;
 #define TRY(t) do { if (v3_len2(v3_sub(xs[t], x)) < range2) { int c_ = g->sorted[t]; if (c_ != s) { if (n < room) out[n] = c_; n++; } } } while (0)
     if (g->dense) {
-        int ix = (int)((x.x - g->origin.x) / g->cell), iy = (int)((x.y - g->origin.y) / g->cell), iz = (int)((x.z - g->origin.z) / g->cell);
+        int ix = dense_coord(x.x, g->origin.x, g->cell, g->nx), iy = dense_coord(x.y, g->origin.y, g->cell, g->ny);
+        int iz = dense_coord(x.z, g->origin.z, g->cell, g->nz);
         int k = g->span, x0 = ix > k ? ix - k : 0, x1 = ix + k < g->nx ? ix + k : g->nx - 1;
         for (int z = iz - k; z <= iz + k; z++)
             for (int y = iy - k; y <= iy + k; y++) {
@@ -262,7 +322,7 @@ static int collect_contacts(sl_world *w) {
 
 /* Greedy coloring of index pairs read from ends with the given stride: no two pairs in one color share
    an index, so a color can run in parallel. Colors go to w->colors, color starts to offsets. */
-int color_graph(sl_world *w, const int *ends, int stride, int count, int *offsets) {
+int sl__color_graph(sl_world *w, const int *ends, int stride, int count, int *offsets) {
     unsigned long long *used = (unsigned long long *)(void *)w->tmp;
     int counts[SL_MAX_COLORS + 1] = {0};
     if (!sl__grow(w, (void **)&w->colors, &w->color_cap, count + 1, 1)) return 0;
@@ -287,7 +347,7 @@ int color_graph(sl_world *w, const int *ends, int stride, int count, int *offset
 
 static int color_contacts(sl_world *w) {
     int fill[SL_MAX_COLORS + 2];
-    if (!color_graph(w, (const int *)(void *)w->contact_tmp, (int)(sizeof(contact) / sizeof(int)), w->contact_count, w->color_off)) return 0;
+    if (!sl__color_graph(w, (const int *)(void *)w->contact_tmp, (int)(sizeof(contact) / sizeof(int)), w->contact_count, w->color_off)) return 0;
     memcpy(fill, w->color_off, sizeof fill);
     for (int k = 0; k < w->contact_count; k++) w->contacts[fill[w->colors[k]]++] = w->contact_tmp[k];
     return 1;
@@ -350,7 +410,7 @@ static void update_islands(sl_world *w) {
 
 /* Picks who sleeps, at the start of a step. Islands are only worked out when some particle has been
    calm long enough to sleep, so violent scenes never pay for them. */
-void settle_islands(sl_world *w) {
+void sl__settle_islands(sl_world *w) {
     int calm = 0;
     if (w->sleep_speed > 0) for (int s = 0; s < w->count && !calm; s++) calm = w->calm[s] >= SL_CALM_STEPS;
     if (!calm) { all_awake(w); return; }
@@ -370,7 +430,7 @@ static int rebuild_failed(sl_world *w) {
     return 0;
 }
 
-int grid_rebuild(sl_world *w, int step_start) {
+int sl__grid_rebuild(sl_world *w, int step_start) {
     int n = w->count;
     w->nbr_valid = 0;
     if (n == 0) {
@@ -383,7 +443,7 @@ int grid_rebuild(sl_world *w, int step_start) {
     PROF(P_SORT, ok = setup_grid(w); if (ok) sort_cells(w));
     if (!ok) return rebuild_failed(w);
     if (step_start) PROF(P_REORDER, reorder(w));
-    if (w->mem_dirty && objects_membership(w)) w->mem_dirty = 0;
+    if (w->mem_dirty && sl__objects_membership(w)) w->mem_dirty = 0;
     for (int s = 0; s < n; s++) { w->p[s] = w->x[s]; w->x_build[s] = w->x[s]; }
 
     float range = w->h + w->skin;
@@ -393,21 +453,22 @@ int grid_rebuild(sl_world *w, int step_start) {
     if (!ok) return rebuild_failed(w);
     /* Mid-step rebuilds keep slots and the awake set; who sleeps is decided at the next step start. */
     w->islands_stale = 1;
-    if (step_start) PROF(P_ISLANDS, settle_islands(w));
+    if (step_start) PROF(P_ISLANDS, sl__settle_islands(w));
     w->built = n;
     w->nbr_valid = 1;
     return 1;
 }
 
 /* Fluid particles within the kernel radius of x and their average velocity, from the last grid build. */
-int grid_fluid_near(sl_world *w, sl_vec3 x, sl_vec3 *avg_vel) {
+int sl__grid_fluid_near(sl_world *w, sl_vec3 x, sl_vec3 *avg_vel) {
     const grid *g = &w->g;
     float h2 = w->h * w->h;
     int n = 0;
     sl_vec3 v = v3(0, 0, 0);
     if (!g->start || w->count == 0) { *avg_vel = v; return 0; }
     if (g->dense) {
-        int ix = (int)floorf((x.x - g->origin.x) / g->cell), iy = (int)floorf((x.y - g->origin.y) / g->cell), iz = (int)floorf((x.z - g->origin.z) / g->cell);
+        int ix = dense_coord(x.x, g->origin.x, g->cell, g->nx), iy = dense_coord(x.y, g->origin.y, g->cell, g->ny);
+        int iz = dense_coord(x.z, g->origin.z, g->cell, g->nz);
         int k = g->span;
         for (int z = iz - k; z <= iz + k; z++)
             for (int y = iy - k; y <= iy + k; y++) {

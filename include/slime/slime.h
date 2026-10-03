@@ -107,7 +107,8 @@ void sl_pin(sl_world *w, sl_particle p, int pinned);
 sl_collider sl_collider_add(sl_world *w, const sl_collider_desc *desc);
 /* Target transform for the next step; the collider sweeps there and pushes particles. Non-finite input is ignored. */
 void sl_collider_move(sl_world *w, sl_collider c, sl_vec3 position, const float rotation[4]);
-/* Force particles put on the collider during the last step, to feed a rigid-body engine. */
+/* Force particles put on the collider during the last step, to feed a rigid-body engine. Each particle can load
+   up to four colliders at once. */
 sl_vec3 sl_collider_force(const sl_world *w, sl_collider c);
 void sl_collider_set_enabled(sl_world *w, sl_collider c, int enabled);
 int sl_collider_enabled(const sl_world *w, sl_collider c);

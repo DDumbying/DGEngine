@@ -43,8 +43,8 @@ static int slot_arrays(sl_world *w, slot_array *out) {
     for (size_t i = 0; i < sizeof floats / sizeof floats[0]; i++) out[n++] = (slot_array){floats[i], sizeof(float), 0};
     void **bytes[] = {(void **)&w->flags, (void **)&w->calm, (void **)&w->mat, (void **)&w->wet, (void **)&w->near_fluid, (void **)&w->mark};
     for (size_t i = 0; i < sizeof bytes / sizeof bytes[0]; i++) out[n++] = (slot_array){bytes[i], 1, 0};
-    out[n++] = (slot_array){(void **)&w->push, 2 * sizeof(sl_vec3), 0};
-    out[n++] = (slot_array){(void **)&w->push_id, 2, 0};
+    out[n++] = (slot_array){(void **)&w->push, SL_PUSH_SLOTS * sizeof(sl_vec3), 0};
+    out[n++] = (slot_array){(void **)&w->push_id, SL_PUSH_SLOTS, 0};
     if (w->use_aniso) out[n++] = (slot_array){(void **)&w->aniso, 4 * sizeof(sl_vec3), 0};
     void **ints[] = {(void **)&w->id, (void **)&w->obj, (void **)&w->island, (void **)&w->material,
                      (void **)&w->g.bucket, (void **)&w->g.sorted, (void **)&w->active, (void **)&w->id_slot, (void **)&w->free_ids};
@@ -60,7 +60,8 @@ static int grow_slots(sl_world *w, int need) {
     if (need > w->max_particles) return 0;
     int n = w->cap > 0 ? w->cap : 1024;
     while (n < need) n *= 2;
-    if (n > w->max_particles) n = w->max_particles;
+    /* At least 16 slots, since some per-slot arrays double as per-chunk scratch (3 entries per chunk). */
+    if (n > w->max_particles) n = w->max_particles > 16 ? w->max_particles : 16;
 
     slot_array arrays[32];
     int count = slot_arrays(w, arrays);
@@ -107,7 +108,7 @@ sl_world *sl_world_create(const sl_world_desc *desc) {
     w->tasks = desc->tasks;
     w->use_aniso = desc->anisotropy != 0;
     w->max_diffuse = desc->max_diffuse > 0 ? desc->max_diffuse : 0;
-    wall_table_init(w);
+    sl__wall_table_init(w);
     if (w->max_diffuse) {
         w->dpos = sl__alloc(w, (size_t)w->max_diffuse * sizeof(sl_vec3));
         w->dvel = sl__alloc(w, (size_t)w->max_diffuse * sizeof(sl_vec3));
@@ -118,7 +119,7 @@ sl_world *sl_world_create(const sl_world_desc *desc) {
 
     if (!grow_slots(w, desc->max_particles < 1024 ? desc->max_particles : 1024)) { sl_world_destroy(w); return NULL; }
     if (!w->tasks.parallel_for && desc->workers > 1) {
-        w->pool = pool_create(w, desc->workers - 1);
+        w->pool = sl__pool_create(w, desc->workers - 1);
         if (!w->pool) { sl_world_destroy(w); return NULL; }
     }
     return w;
@@ -126,7 +127,7 @@ sl_world *sl_world_create(const sl_world_desc *desc) {
 
 void sl_world_destroy(sl_world *w) {
     if (!w) return;
-    pool_destroy(w, w->pool);
+    sl__pool_destroy(w, w->pool);
     slot_array arrays[32];
     int count = slot_arrays(w, arrays);
     for (int i = 0; i < count; i++) sl__free(w, *arrays[i].ptr);
@@ -168,7 +169,7 @@ sl_material sl_material_add(sl_world *w, const sl_material_desc *desc) {
     return w->material_count++;
 }
 
-int slot_of(const sl_world *w, sl_particle p) {
+int sl__slot_of(const sl_world *w, sl_particle p) {
     if (!w || p < 0 || id_index(w, p) >= w->next_id) return -1;
     int s = w->id_slot[id_index(w, p)];
     return s >= 0 && s < w->count && w->id[s] == p ? s : -1;
@@ -196,7 +197,7 @@ sl_particle sl_spawn(sl_world *w, sl_material m, sl_vec3 pos, sl_vec3 vel) {
     w->flags[s] = w->materials[m].kind == SL_FLUID ? F_FLUID : 0;
     w->calm[s] = 0;
     w->obj[s] = -1;
-    w->push_id[2 * s] = w->push_id[2 * s + 1] = 0;
+    for (int k = 0; k < SL_PUSH_SLOTS; k++) w->push_id[SL_PUSH_SLOTS * s + k] = 0;
     w->wet[s] = 0;
     if (w->use_aniso) {
         float r = w->radius;
@@ -237,9 +238,35 @@ int sl_spawn_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max) {
     return added;
 }
 
-static void wake_near(sl_world *w, sl_vec3 c, float reach) {
-    for (int s = 0; s < w->count; s++)
-        if (v3_len2(v3_sub(w->x[s], c)) < reach * reach) w->calm[s] = 0;
+/* Wakes are queued and done in one pass at the next step, so edits between steps never scan every particle. */
+static void queue_wake(sl_world *w, sl_vec3 lo, sl_vec3 hi) {
+    if (w->wake_count == SL_MAX_WAKES) { w->wake_all = 1; return; }
+    w->wakes[w->wake_count].lo = lo;
+    w->wakes[w->wake_count].hi = hi;
+    w->wake_count++;
+}
+
+/* Whatever a collider can reach while it sweeps from a to b; containers and planes reach everything. */
+static void queue_collider_wake(sl_world *w, const sl_collider_desc *d, sl_vec3 a, sl_vec3 b, float margin) {
+    if (d->inside || d->shape == SL_PLANE) { w->wake_all = 1; return; }
+    float reach = sl__bound_radius(d) + margin;
+    queue_wake(w, v3(fminf(a.x, b.x) - reach, fminf(a.y, b.y) - reach, fminf(a.z, b.z) - reach),
+               v3(fmaxf(a.x, b.x) + reach, fmaxf(a.y, b.y) + reach, fmaxf(a.z, b.z) + reach));
+}
+
+static void apply_wakes(sl_world *w) {
+    if (w->wake_all) {
+        for (int s = 0; s < w->count; s++) w->calm[s] = 0;
+    } else if (w->wake_count) {
+        for (int s = 0; s < w->count; s++) {
+            sl_vec3 x = w->x[s];
+            for (int k = 0; k < w->wake_count; k++) {
+                sl_vec3 lo = w->wakes[k].lo, hi = w->wakes[k].hi;
+                if (x.x > lo.x && x.y > lo.y && x.z > lo.z && x.x < hi.x && x.y < hi.y && x.z < hi.z) { w->calm[s] = 0; break; }
+            }
+        }
+    }
+    w->wake_count = w->wake_all = 0;
 }
 
 /* Wakes whatever touched a marked slot: its neighbors when the lists are current, else a box around them. */
@@ -272,7 +299,10 @@ static void move_slot(sl_world *w, int dst, int src) {
     w->material[dst] = w->material[src];
     if (w->use_aniso) for (int k = 0; k < 4; k++) w->aniso[4 * dst + k] = w->aniso[4 * src + k];
     w->id[dst] = w->id[src]; w->obj[dst] = w->obj[src];
-    for (int k = 0; k < 2; k++) { w->push[2 * dst + k] = w->push[2 * src + k]; w->push_id[2 * dst + k] = w->push_id[2 * src + k]; }
+    for (int k = 0; k < SL_PUSH_SLOTS; k++) {
+        w->push[SL_PUSH_SLOTS * dst + k] = w->push[SL_PUSH_SLOTS * src + k];
+        w->push_id[SL_PUSH_SLOTS * dst + k] = w->push_id[SL_PUSH_SLOTS * src + k];
+    }
 }
 
 /* Removes every slot with mark set in one pass, keeping the order of the rest; returns how many went. */
@@ -289,15 +319,15 @@ static int remove_marked(sl_world *w) {
     if (!removed) return 0;
     w->count = n;
     for (int g = 0; g < w->grab_count; g++)
-        if (slot_of(w, w->grabs[g].id) < 0) w->grabs[g--] = w->grabs[--w->grab_count];
-    objects_remap(w, old_to_new);
+        if (sl__slot_of(w, w->grabs[g].id) < 0) w->grabs[g--] = w->grabs[--w->grab_count];
+    sl__objects_remap(w, old_to_new);
     w->need_rebuild = 1;
     w->nbr_valid = 0;
     return removed;
 }
 
 /* Marks loose particles in the sphere (if any) and every particle of objects flagged for removal. */
-int remove_doomed(sl_world *w, const sl_vec3 *center, float radius) {
+int sl__remove_doomed(sl_world *w, const sl_vec3 *center, float radius) {
     int doomed = 0;
     for (int s = 0; s < w->count; s++) {
         int o = w->obj[s], in = center && v3_len2(v3_sub(w->x[s], *center)) <= radius * radius;
@@ -306,13 +336,13 @@ int remove_doomed(sl_world *w, const sl_vec3 *center, float radius) {
     }
     for (int o = 0; o < w->object_count; o++) doomed |= w->objects[o].alive == 2;
     for (int s = 0; doomed && s < w->count; s++) if (w->obj[s] >= 0 && w->objects[w->obj[s]].alive == 2) w->mark[s] = 1;
-    for (int o = 0; doomed && o < w->object_count; o++) if (w->objects[o].alive == 2) objects_drop(w, o);
-    if (doomed) color_dist(w);
+    for (int o = 0; doomed && o < w->object_count; o++) if (w->objects[o].alive == 2) sl__objects_drop(w, o);
+    if (doomed) sl__color_dist(w);
     return remove_marked(w);
 }
 
 int sl_remove(sl_world *w, sl_particle p) {
-    int s = slot_of(w, p);
+    int s = sl__slot_of(w, p);
     if (s < 0 || w->obj[s] >= 0) return 0;
     memset(w->mark, 0, (size_t)w->count);
     w->mark[s] = 1;
@@ -331,40 +361,40 @@ void sl_clear(sl_world *w) {
     w->active_count = w->contact_count = w->pair_count = w->island_count = 0;
     w->grab_count = 0;
     w->diffuse_count = 0;
+    w->wake_count = w->wake_all = 0;
     w->need_rebuild = w->mem_dirty = 1;
     w->nbr_valid = 0;
 }
 
-int sl_alive(const sl_world *w, sl_particle p) { return slot_of(w, p) >= 0; }
+int sl_alive(const sl_world *w, sl_particle p) { return sl__slot_of(w, p) >= 0; }
 
 sl_vec3 sl_position(const sl_world *w, sl_particle p) {
-    int s = slot_of(w, p);
+    int s = sl__slot_of(w, p);
     return s >= 0 ? w->x[s] : v3(0, 0, 0);
 }
 
 sl_vec3 sl_velocity(const sl_world *w, sl_particle p) {
-    int s = slot_of(w, p);
+    int s = sl__slot_of(w, p);
     return s >= 0 ? w->v[s] : v3(0, 0, 0);
 }
 
 void sl_set_position(sl_world *w, sl_particle p, sl_vec3 pos) {
-    int s = slot_of(w, p);
+    int s = sl__slot_of(w, p);
     if (s < 0 || !v3_finite(pos)) return;
     w->x[s] = w->p[s] = w->x_step[s] = pos;
     w->calm[s] = 0;
-    wake_near(w, pos, w->h * 2);
-    w->need_rebuild = 1;
+    w->need_rebuild = 1;   /* the rebuild regroups islands, so whatever it lands next to wakes with it */
 }
 
 void sl_set_velocity(sl_world *w, sl_particle p, sl_vec3 vel) {
-    int s = slot_of(w, p);
+    int s = sl__slot_of(w, p);
     if (s < 0 || !v3_finite(vel)) return;
     w->v[s] = vel;
     w->calm[s] = 0;
 }
 
 void sl_pin(sl_world *w, sl_particle p, int pinned) {
-    int s = slot_of(w, p);
+    int s = sl__slot_of(w, p);
     if (s < 0) return;
     if (pinned) { w->flags[s] |= F_PINNED; w->inv_mass[s] = 0; w->v[s] = v3(0, 0, 0); }
     else {
@@ -374,7 +404,7 @@ void sl_pin(sl_world *w, sl_particle p, int pinned) {
     w->calm[s] = 0;
 }
 
-float bound_radius(const sl_collider_desc *d) {
+float sl__bound_radius(const sl_collider_desc *d) {
     switch (d->shape) {
     case SL_SPHERE: return d->radius;
     case SL_CAPSULE: return d->radius + d->half_extents.y;
@@ -410,8 +440,7 @@ sl_collider sl_collider_add(sl_world *w, const sl_collider_desc *desc) {
     }
     c->rot = c->prev_rot = q_from(desc->rotation);
     c->prev_pos = desc->position;
-    if (c->desc.inside) for (int s = 0; s < w->count; s++) w->calm[s] = 0;
-    else wake_near(w, desc->position, bound_radius(&c->desc) + w->h);
+    queue_collider_wake(w, &c->desc, desc->position, desc->position, w->h);
     if (slot == w->collider_count) w->collider_count++;
     return slot;
 }
@@ -422,8 +451,7 @@ static int valid_collider(const sl_world *w, sl_collider c) {
 
 static void wake_collider(sl_world *w, sl_collider c) {
     const sl_collider_desc *d = &w->colliders[c].desc;
-    if (d->inside || d->shape == SL_PLANE) for (int s = 0; s < w->count; s++) w->calm[s] = 0;
-    else wake_near(w, d->position, bound_radius(d) + w->h);
+    queue_collider_wake(w, d, d->position, d->position, w->h);
 }
 
 void sl_collider_set_enabled(sl_world *w, sl_collider c, int enabled) {
@@ -441,7 +469,7 @@ void sl_collider_remove(sl_world *w, sl_collider c) {
     w->colliders[c].enabled = 0;
     w->colliders[c].removed = 1;
     unsigned char id = (unsigned char)(c + 1);
-    for (int k = 0; k < 2 * w->count; k++)
+    for (int k = 0; k < SL_PUSH_SLOTS * w->count; k++)
         if (w->push_id[k] == id) { w->push_id[k] = 0; w->push[k] = v3(0, 0, 0); }
     while (w->collider_count > 0 && w->colliders[w->collider_count - 1].removed) w->collider_count--;
 }
@@ -473,7 +501,7 @@ static int find_grab(const sl_world *w, sl_particle p) {
 }
 
 int sl_grab_begin(sl_world *w, sl_particle p) {
-    int s = slot_of(w, p);
+    int s = sl__slot_of(w, p);
     if (s < 0 || find_grab(w, p) >= 0 || w->grab_count >= SL_MAX_GRABS) return 0;
     w->grabs[w->grab_count++] = (grab){p, w->x[s], w->x[s]};
     w->flags[s] |= F_GRAB;
@@ -491,7 +519,7 @@ void sl_grab_end(sl_world *w, sl_particle p) {
     int g = w ? find_grab(w, p) : -1;
     if (g < 0) return;
     w->grabs[g] = w->grabs[--w->grab_count];
-    int s = slot_of(w, p);
+    int s = sl__slot_of(w, p);
     if (s < 0) return;
     w->flags[s] &= (unsigned char)~F_GRAB;
     if (!(w->flags[s] & F_PINNED)) w->inv_mass[s] = 1.0f / w->mass[s];
@@ -501,7 +529,7 @@ void sl_grab_end(sl_world *w, sl_particle p) {
 /* Removes loose particles inside the sphere and whole objects that reach into it. */
 int sl_remove_sphere(sl_world *w, sl_vec3 center, float radius) {
     if (!w || !(radius > 0) || !v3_finite(center)) return 0;
-    return remove_doomed(w, &center, radius);
+    return sl__remove_doomed(w, &center, radius);
 }
 
 void sl_collider_move(sl_world *w, sl_collider id, sl_vec3 position, const float rotation[4]) {
@@ -523,19 +551,9 @@ static void wake_for_colliders(sl_world *w) {
         sl_vec3 a = col->prev_pos, b = col->desc.position;
         quat q0 = col->prev_rot, q1 = col->rot;
         int moved = a.x != b.x || a.y != b.y || a.z != b.z || q0.x != q1.x || q0.y != q1.y || q0.z != q1.z || q0.w != q1.w;
-        if (!moved || !col->enabled) continue;
-        float reach = bound_radius(&col->desc) + w->h + w->spacing;
-        if (col->desc.shape == SL_PLANE || col->desc.inside) {
-            for (int s = 0; s < w->count; s++) w->calm[s] = 0;
-            continue;
-        }
-        sl_vec3 lo = v3(fminf(a.x, b.x) - reach, fminf(a.y, b.y) - reach, fminf(a.z, b.z) - reach);
-        sl_vec3 hi = v3(fmaxf(a.x, b.x) + reach, fmaxf(a.y, b.y) + reach, fmaxf(a.z, b.z) + reach);
-        for (int s = 0; s < w->count; s++) {
-            sl_vec3 x = w->x[s];
-            if (x.x > lo.x && x.y > lo.y && x.z > lo.z && x.x < hi.x && x.y < hi.y && x.z < hi.z) w->calm[s] = 0;
-        }
+        if (moved && col->enabled) queue_collider_wake(w, &col->desc, a, b, w->h + w->spacing);
     }
+    apply_wakes(w);
 }
 
 /* Neighbor lists hold while nothing can have moved more than half the skin by the end of the substep. */
@@ -558,7 +576,7 @@ static int needs_rebuild(sl_world *w) {
 
 static void refresh(sl_world *w, int step_start) {
     if (w->need_rebuild || needs_rebuild(w)) {
-        if (grid_rebuild(w, step_start)) { w->need_rebuild = 0; w->rebuilds++; }
+        if (sl__grid_rebuild(w, step_start)) { w->need_rebuild = 0; w->rebuilds++; }
     }
 }
 
@@ -568,8 +586,7 @@ static void begin_step(sl_world *w, int begin, int end, int chunk, void *ctx) {
         int s = w->active[k];
         w->x_step[s] = w->x[s];
         w->flags[s] &= (unsigned char)~(F_TOUCH | F_WET);
-        w->push_id[2 * s] = w->push_id[2 * s + 1] = 0;
-        w->push[2 * s] = w->push[2 * s + 1] = v3(0, 0, 0);
+        for (int k = 0; k < SL_PUSH_SLOTS; k++) { w->push_id[SL_PUSH_SLOTS * s + k] = 0; w->push[SL_PUSH_SLOTS * s + k] = v3(0, 0, 0); }
     }
 }
 
@@ -599,46 +616,44 @@ void sl_step(sl_world *w, float dt) {
 #endif
     w->dt = dt;
     w->hs = dt / (float)w->substeps;
-    if (w->pool) pool_wake(w->pool);
 
     wake_for_colliders(w);
     for (int g = 0; g < w->grab_count; g++) {
-        int s = slot_of(w, w->grabs[g].id);
+        int s = sl__slot_of(w, w->grabs[g].id);
         if (s >= 0) w->calm[s] = 0;
         else w->grabs[g--] = w->grabs[--w->grab_count];
     }
-    if (w->mem_dirty && objects_membership(w)) w->mem_dirty = 0;
-    if (!w->need_rebuild) settle_islands(w);
+    if (w->mem_dirty && sl__objects_membership(w)) w->mem_dirty = 0;
+    if (!w->need_rebuild) sl__settle_islands(w);
     refresh(w, 1);
 
     /* A world that is fully asleep skips the solver; spray and collider loads still update below. */
     if (w->active_count) {
-        PROF(P_STABILIZE, stabilize(w); stabilize(w));
+        PROF(P_STABILIZE, sl__stabilize(w); sl__stabilize(w));
         sl__parallel(w, w->active_count, begin_step, NULL);
         for (int s = 0; s < w->substeps; s++) {
             if (s > 0) refresh(w, 0);
-            solve_substep(w, (float)(s + 1) / (float)w->substeps);
+            sl__solve_substep(w, (float)(s + 1) / (float)w->substeps);
         }
-        PROF(P_FLUID_STEP, fluid_step(w));
+        PROF(P_FLUID_STEP, sl__fluid_step(w));
         sl__parallel(w, w->active_count, end_step, NULL);
     }
     for (int g = 0; g < w->grab_count; g++) w->grabs[g].from = w->grabs[g].to;
-    PROF(P_EXTRAS, if (w->max_diffuse) diffuse_step(w); if (w->use_aniso) anisotropy_step(w));
+    PROF(P_EXTRAS, if (w->max_diffuse) sl__diffuse_step(w); if (w->use_aniso) sl__anisotropy_step(w));
     w->step_count++;
-    objects_plasticity(w);
+    sl__objects_plasticity(w);
 
     for (int c = 0; c < w->collider_count; c++) w->colliders[c].force = v3(0, 0, 0);
     for (int s = 0; s < w->count && w->collider_count; s++)
-        for (int k = 0; k < 2; k++)
-            if (w->push_id[2 * s + k]) {
-                collider *col = &w->colliders[w->push_id[2 * s + k] - 1];
-                col->force = v3_madd(col->force, w->push[2 * s + k], 1.0f / dt);
+        for (int k = 0; k < SL_PUSH_SLOTS; k++)
+            if (w->push_id[SL_PUSH_SLOTS * s + k]) {
+                collider *col = &w->colliders[w->push_id[SL_PUSH_SLOTS * s + k] - 1];
+                col->force = v3_madd(col->force, w->push[SL_PUSH_SLOTS * s + k], 1.0f / dt);
             }
     for (int c = 0; c < w->collider_count; c++) {
         w->colliders[c].prev_pos = w->colliders[c].desc.position;
         w->colliders[c].prev_rot = w->colliders[c].rot;
     }
-    if (w->pool) pool_sleep(w->pool);
 #ifdef SLIME_PROFILE
     sl__prof[P_STEP] += sl__now() - start;
 #endif
