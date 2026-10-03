@@ -39,17 +39,16 @@ static float sdf_local(const sl_collider_desc *d, sl_vec3 p, sl_vec3 *n) {
 
 /* World space signed distance at the collider's current transform, with outward normal. */
 float collider_distance(const collider *col, sl_vec3 p, sl_vec3 *n) {
-    quat rot = col->desc.shape == SL_PLANE ? q_identity() : col->rot;
-    sl_vec3 local = q_rotate(q_conj(rot), v3_sub(p, col->desc.position)), ln;
+    sl_vec3 local = q_rotate(q_conj(col->rot), v3_sub(p, col->desc.position)), ln;
     float d = sdf_local(&col->desc, local, &ln);
     if (col->desc.inside) { d = -d; ln = v3_scale(ln, -1.0f); }
-    *n = q_rotate(rot, ln);
+    *n = q_rotate(col->rot, ln);
     return d;
 }
 
 static void frame(const collider *col, float t, sl_vec3 *pos, quat *rot) {
     *pos = v3_lerp(col->prev_pos, col->desc.position, t);
-    *rot = col->desc.shape == SL_PLANE ? q_identity() : q_nlerp(col->prev_rot, col->rot, t);
+    *rot = q_nlerp(col->prev_rot, col->rot, t);
 }
 
 void collider_frames(sl_world *w, float t) {

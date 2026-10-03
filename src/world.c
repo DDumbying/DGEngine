@@ -91,6 +91,8 @@ sl_world *sl_world_create(const sl_world_desc *desc) {
     memset(w, 0, sizeof *w);
     w->alloc = a;
     w->max_particles = desc->max_particles;
+    w->id_bits = 1;
+    while (w->id_bits < 31 && (1u << w->id_bits) < (unsigned)desc->max_particles) w->id_bits++;
     w->substeps = desc->substeps > 0 ? desc->substeps : 4;
     w->iterations = desc->iterations > 0 ? desc->iterations : 4;
     w->fluid_iterations = desc->fluid_iterations > 0 ? desc->fluid_iterations : 2;
@@ -152,25 +154,38 @@ void sl_world_destroy(sl_world *w) {
     a.free(w, a.user);
 }
 
+/* Finite and not negative; negative coefficients would feed energy into the solver. */
+static int non_negative(float v) { return isfinite(v) && v >= 0; }
+
 sl_material sl_material_add(sl_world *w, const sl_material_desc *desc) {
     if (!w || !desc || w->material_count >= SL_MAX_MATERIALS) return -1;
     sl_material_desc m = *desc;
+    if ((m.kind != SL_FLUID && m.kind != SL_GRANULAR && m.kind != SL_SOLID) || !non_negative(m.density)
+        || !non_negative(m.viscosity) || !non_negative(m.cohesion) || !non_negative(m.friction)
+        || !non_negative(m.vorticity) || !non_negative(m.damping) || !non_negative(m.wet_cohesion)) return -1;
     if (m.density <= 0) m.density = 1000.0f;
     w->materials[w->material_count] = m;
     return w->material_count++;
 }
 
 int slot_of(const sl_world *w, sl_particle p) {
-    if (!w || p < 0 || p >= w->next_id) return -1;
-    int s = w->id_slot[p];
+    if (!w || p < 0 || id_index(w, p) >= w->next_id) return -1;
+    int s = w->id_slot[id_index(w, p)];
     return s >= 0 && s < w->count && w->id[s] == p ? s : -1;
+}
+
+/* A freed id comes back with its generation bumped, so the old one never matches again. */
+static sl_particle reissue(const sl_world *w, sl_particle old) {
+    unsigned gen_mask = w->id_bits < 31 ? (1u << (31 - w->id_bits)) - 1u : 0u;
+    unsigned gen = (((unsigned)old >> w->id_bits) + 1u) & gen_mask;
+    return (sl_particle)((gen << w->id_bits) | (unsigned)id_index(w, old));
 }
 
 sl_particle sl_spawn(sl_world *w, sl_material m, sl_vec3 pos, sl_vec3 vel) {
     if (!w || m < 0 || m >= w->material_count || !v3_finite(pos) || !v3_finite(vel)) return -1;
     if (w->count >= w->max_particles || !grow_slots(w, w->count + 1)) return -1;
     int s = w->count++;
-    int id = w->free_count > 0 ? w->free_ids[--w->free_count] : w->next_id++;
+    int id = w->free_count > 0 ? reissue(w, w->free_ids[--w->free_count]) : w->next_id++;
     float d = w->spacing;
     w->x[s] = w->p[s] = w->x_step[s] = w->x_build[s] = pos;
     w->v[s] = vel;
@@ -191,7 +206,7 @@ sl_particle sl_spawn(sl_world *w, sl_material m, sl_vec3 pos, sl_vec3 vel) {
         w->aniso[4 * s + 3] = v3(0, 0, r);
     }
     w->id[s] = id;
-    w->id_slot[id] = s;
+    w->id_slot[id_index(w, id)] = s;
     w->need_rebuild = 1;
     return id;
 }
@@ -267,7 +282,7 @@ static int remove_marked(sl_world *w) {
     for (int s = 0; s < w->count; s++) {
         if (w->mark[s]) { w->free_ids[w->free_count++] = w->id[s]; old_to_new[s] = -1; continue; }
         if (n != s) move_slot(w, n, s);
-        w->id_slot[w->id[n]] = n;
+        w->id_slot[id_index(w, w->id[n])] = n;
         old_to_new[s] = n++;
     }
     int removed = w->count - n;
@@ -310,7 +325,9 @@ void sl_clear(sl_world *w) {
     w->object_count = w->dist_count = w->cluster_count = w->member_count = 0;
     memset(w->dist_color_off, 0, sizeof w->dist_color_off);
     memset(w->color_off, 0, sizeof w->color_off);
-    w->count = w->free_count = w->next_id = 0;
+    /* Ids go back on the free list rather than starting over, so handles from before the clear stay dead. */
+    for (int s = 0; s < w->count; s++) w->free_ids[w->free_count++] = w->id[s];
+    w->count = 0;
     w->active_count = w->contact_count = w->pair_count = w->island_count = 0;
     w->grab_count = 0;
     w->diffuse_count = 0;
@@ -366,8 +383,19 @@ float bound_radius(const sl_collider_desc *d) {
     }
 }
 
+static int finite_rotation(const float r[4]) {
+    return isfinite(r[0]) && isfinite(r[1]) && isfinite(r[2]) && isfinite(r[3]);
+}
+
+static int valid_desc(const sl_collider_desc *d) {
+    sl_vec3 e = d->half_extents;
+    return (d->shape == SL_PLANE || d->shape == SL_BOX || d->shape == SL_SPHERE || d->shape == SL_CAPSULE)
+        && v3_finite(d->position) && v3_finite(d->normal) && finite_rotation(d->rotation)
+        && non_negative(e.x) && non_negative(e.y) && non_negative(e.z) && non_negative(d->radius) && non_negative(d->friction);
+}
+
 sl_collider sl_collider_add(sl_world *w, const sl_collider_desc *desc) {
-    if (!w || !desc) return -1;
+    if (!w || !desc || !valid_desc(desc)) return -1;
     int slot = 0;
     while (slot < w->collider_count && !w->colliders[slot].removed) slot++;
     if (slot >= SL_MAX_COLLIDERS) return -1;
@@ -477,7 +505,7 @@ int sl_remove_sphere(sl_world *w, sl_vec3 center, float radius) {
 }
 
 void sl_collider_move(sl_world *w, sl_collider id, sl_vec3 position, const float rotation[4]) {
-    if (!valid_collider(w, id) || !v3_finite(position)) return;
+    if (!valid_collider(w, id) || !v3_finite(position) || (rotation && !finite_rotation(rotation))) return;
     collider *c = &w->colliders[id];
     c->desc.position = position;
     if (rotation) c->rot = q_from(rotation);
@@ -552,6 +580,8 @@ static void end_step(sl_world *w, int begin, int end, int chunk, void *ctx) {
     for (int k = begin; k < end; k++) {
         int s = w->active[k];
         if (!v3_finite(w->x[s]) || !v3_finite(w->v[s])) { w->x[s] = w->p[s] = w->x_step[s]; w->v[s] = v3(0, 0, 0); }
+        if (w->flags[s] & F_WET) w->wet[s] = 255;
+        else if (w->wet[s]) w->wet[s]--;
         if (w->sleep_speed <= 0) continue;
         int still = v3_len2(v3_scale(v3_sub(w->x[s], w->x_step[s]), 1.0f / w->dt)) < slow;
         if (still && (w->flags[s] & (F_TOUCH | F_FLUID)) == F_TOUCH && w->obj[s] < 0) {
@@ -559,8 +589,6 @@ static void end_step(sl_world *w, int begin, int end, int chunk, void *ctx) {
             w->v[s] = v3(0, 0, 0);
         }
         w->calm[s] = still ? (w->calm[s] < 255 ? w->calm[s] + 1 : 255) : 0;
-        if (w->flags[s] & F_WET) w->wet[s] = 255;
-        else if (w->wet[s]) w->wet[s]--;
     }
 }
 
