@@ -124,7 +124,7 @@ static void reorder(sl_world *w) {
         for (int k = 0; k < n; k++) w->tmp[k] = w->aniso[4 * g->sorted[k] + q];
         for (int k = 0; k < n; k++) w->aniso[4 * k + q] = w->tmp[k];
     }
-    for (int k = 0; k < n; k++) { w->id_slot[w->id[k]] = k; g->bucket[g->sorted[k]] = k; }
+    for (int k = 0; k < n; k++) { w->id_slot[id_index(w, w->id[k])] = k; g->bucket[g->sorted[k]] = k; }
     objects_remap(w, g->bucket);
     for (int k = 0; k < n; k++) g->sorted[k] = k;
 }

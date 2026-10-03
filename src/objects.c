@@ -14,7 +14,7 @@ static int spawn_into(sl_world *w, int obj, sl_material m, sl_vec3 pos) {
     object *o = &w->objects[obj];
     sl_particle id = sl_spawn(w, m, pos, v3(0, 0, 0));
     if (id < 0) return 0;
-    int s = w->id_slot[id];
+    int s = slot_of(w, id);
     w->obj[s] = obj;
     w->flags[s] &= (unsigned char)~F_FLUID;
     o->ids[o->count++] = id;
@@ -70,7 +70,7 @@ sl_object sl_rope_create(sl_world *w, sl_material m, sl_vec3 a, sl_vec3 b, float
     int ok = alloc_ids(w, obj, n);
     for (int i = 0; ok && i < n; i++) ok = spawn_into(w, obj, m, v3_lerp(a, b, (float)i / (float)(n - 1)));
     const sl_particle *ids = w->objects[obj].ids;
-    for (int i = 0; ok && i + 1 < n; i++) ok = add_dist(w, obj, w->id_slot[ids[i]], w->id_slot[ids[i + 1]], compliance);
+    for (int i = 0; ok && i + 1 < n; i++) ok = add_dist(w, obj, slot_of(w, ids[i]), slot_of(w, ids[i + 1]), compliance);
     return finish(w, obj, ok);
 }
 
@@ -91,7 +91,7 @@ sl_object sl_cloth_create(sl_world *w, sl_material m, sl_vec3 origin, sl_vec3 u,
         for (int i = 0; ok && i < nu; i++)
             ok = spawn_into(w, obj, m, v3_add(origin, v3_add(v3_scale(u, (float)i / (float)(nu - 1)), v3_scale(v, (float)j / (float)(nv - 1)))));
     const sl_particle *ids = w->objects[obj].ids;
-#define AT(i, j) w->id_slot[ids[(j) * nu + (i)]]
+#define AT(i, j) slot_of(w, ids[(j) * nu + (i)])
     for (int j = 0; ok && j < nv; j++)
         for (int i = 0; ok && i < nu; i++) {
             if (i + 1 < nu) ok = ok && add_dist(w, obj, AT(i, j), AT(i + 1, j), stretch_compliance);
@@ -107,17 +107,10 @@ sl_object sl_cloth_create(sl_world *w, sl_material m, sl_vec3 origin, sl_vec3 u,
     return finish(w, obj, ok);
 }
 
-/* Lattice ranges per axis: one block for small sizes, otherwise blocks of 5 that overlap by 3. */
-static int axis_ranges(int n, int lo[], int hi[]) {
-    if (n <= 5) { lo[0] = 0; hi[0] = n - 1; return 1; }
-    int k = 0;
-    for (int start = 0;; start += 2) {
-        lo[k] = start;
-        hi[k] = start + 4 < n - 1 ? start + 4 : n - 1;
-        k++;
-        if (hi[k - 1] == n - 1) return k;
-    }
-}
+/* Lattice ranges per axis: one block for small sizes, otherwise blocks of 5 that overlap by 3.
+   Block c covers [2c, min(2c + 4, n - 1)]. */
+static int axis_blocks(int n) { return n <= 5 ? 1 : (n - 4) / 2 + 1; }
+static int block_hi(int n, int c) { return 2 * c + 4 < n - 1 ? 2 * c + 4 : n - 1; }
 
 sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max,
                                  float stiffness, float plasticity) {
@@ -142,13 +135,12 @@ sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec
                 ok = spawn_into(w, obj, m, v3(min.x + r + i * d + o[0], min.y + r + j * d + o[1], min.z + r + k * d + o[2]));
             }
 
-    int lo[3][64], hi[3][64], cnt[3];
-    for (int a = 0; a < 3; a++) cnt[a] = n[a] > 120 ? 0 : axis_ranges(n[a], lo[a], hi[a]);
     const sl_particle *ids = w->objects[obj].ids;
-    for (int cz = 0; ok && cz < cnt[2]; cz++)
-        for (int cy = 0; ok && cy < cnt[1]; cy++)
-            for (int cx = 0; ok && cx < cnt[0]; cx++) {
-                int size = (hi[0][cx] - lo[0][cx] + 1) * (hi[1][cy] - lo[1][cy] + 1) * (hi[2][cz] - lo[2][cz] + 1);
+    for (int cz = 0; ok && cz < axis_blocks(n[2]); cz++)
+        for (int cy = 0; ok && cy < axis_blocks(n[1]); cy++)
+            for (int cx = 0; ok && cx < axis_blocks(n[0]); cx++) {
+                int lo[3] = {2 * cx, 2 * cy, 2 * cz}, hi[3] = {block_hi(n[0], cx), block_hi(n[1], cy), block_hi(n[2], cz)};
+                int size = (hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1);
                 if (!sl__grow(w, (void **)&w->clusters, &w->cluster_cap, w->cluster_count + 1, sizeof(cluster))
                     || !sl__grow(w, (void **)&w->members, &w->member_cap, w->member_count + size, sizeof(member))) { ok = 0; break; }
                 cluster *c = &w->clusters[w->cluster_count++];
@@ -161,10 +153,10 @@ sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec
                 c->pull = c->stiffness >= 1 ? 1.0f : 1.0f - powf(1.0f - c->stiffness, 1.0f / (float)(w->substeps * w->iterations));
                 c->rot = q_identity();
                 sl_vec3 center = v3(0, 0, 0);
-                for (int k = lo[2][cz]; k <= hi[2][cz]; k++)
-                    for (int j = lo[1][cy]; j <= hi[1][cy]; j++)
-                        for (int i = lo[0][cx]; i <= hi[0][cx]; i++) {
-                            int s = w->id_slot[ids[(k * n[1] + j) * n[0] + i]];
+                for (int k = lo[2]; k <= hi[2]; k++)
+                    for (int j = lo[1]; j <= hi[1]; j++)
+                        for (int i = lo[0]; i <= hi[0]; i++) {
+                            int s = slot_of(w, ids[(k * n[1] + j) * n[0] + i]);
                             w->members[w->member_count++] = (member){s, w->cluster_count - 1, w->x[s]};
                             center = v3_add(center, w->x[s]);
                         }

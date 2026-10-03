@@ -20,7 +20,8 @@ typedef struct sl_world sl_world;
 typedef int sl_material;
 typedef int sl_collider;
 typedef int sl_object;
-typedef int sl_particle;   /* stable id, stays valid until the particle is removed */
+typedef int sl_particle;   /* stable id, valid until the particle is removed; after that it reads as dead, even
+                              once the particle's slot is reused or the world is cleared */
 
 typedef enum { SL_FLUID, SL_GRANULAR, SL_SOLID } sl_kind;
 typedef enum { SL_PLANE, SL_BOX, SL_SPHERE, SL_CAPSULE } sl_shape;
@@ -70,7 +71,7 @@ typedef struct {
     float rotation[4];      /* quaternion x, y, z, w; all zero means identity */
     sl_vec3 half_extents;   /* box size, capsule half height in y */
     float radius;           /* sphere and capsule */
-    sl_vec3 normal;         /* plane; zero means +y */
+    sl_vec3 normal;         /* plane, in the collider's frame so rotation turns it; zero means +y */
     int inside;             /* keep particles inside instead of outside */
     float friction;
 } sl_collider_desc;
@@ -83,7 +84,7 @@ typedef struct {
 sl_world *sl_world_create(const sl_world_desc *desc);
 void sl_world_destroy(sl_world *w);
 
-/* Returns -1 when SL_MAX_MATERIALS is reached. */
+/* Returns -1 when SL_MAX_MATERIALS is reached, or for an unknown kind or a negative or non-finite value. */
 sl_material sl_material_add(sl_world *w, const sl_material_desc *desc);
 
 /* Returns -1 when full or the material is invalid. */
@@ -102,9 +103,9 @@ void sl_set_velocity(sl_world *w, sl_particle p, sl_vec3 vel);
 /* A pinned particle ignores forces and is only moved by sl_set_position. */
 void sl_pin(sl_world *w, sl_particle p, int pinned);
 
-/* Returns -1 when SL_MAX_COLLIDERS is reached. */
+/* Returns -1 when SL_MAX_COLLIDERS is reached, or for an unknown shape or a negative or non-finite value. */
 sl_collider sl_collider_add(sl_world *w, const sl_collider_desc *desc);
-/* Target transform for the next step; the collider sweeps there and pushes particles. */
+/* Target transform for the next step; the collider sweeps there and pushes particles. Non-finite input is ignored. */
 void sl_collider_move(sl_world *w, sl_collider c, sl_vec3 position, const float rotation[4]);
 /* Force particles put on the collider during the last step, to feed a rigid-body engine. */
 sl_vec3 sl_collider_force(const sl_world *w, sl_collider c);

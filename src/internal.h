@@ -75,8 +75,8 @@ struct sl_world {
     int *id, *obj, *island, *order;
     sl_material *material;       /* mat widened to the public type, so sl_materials can hand it out */
 
-    /* stable ids */
-    int *id_slot, *free_ids, free_count, next_id;
+    /* stable ids: the low id_bits are an index into id_slot, the rest count how often that index was reused */
+    int *id_slot, *free_ids, free_count, next_id, id_bits;
 
     sl_material_desc materials[SL_MAX_MATERIALS];
     int material_count;
@@ -155,6 +155,7 @@ void pool_run(sl_pool *p, sl_task_fn *task, int count, void *ctx);
 static inline float kernel(float r, float h) { return r < h ? (h - r) * (h - r) * (h - r) : 0.0f; }
 static inline float kernel_grad(float r, float h) { return r < h ? -3.0f * (h - r) * (h - r) : 0.0f; }
 
+static inline int id_index(const sl_world *w, sl_particle p) { return (int)((unsigned)p & ((1u << w->id_bits) - 1u)); }
 int slot_of(const sl_world *w, sl_particle p);
 float bound_radius(const sl_collider_desc *d);
 int remove_doomed(sl_world *w, const sl_vec3 *center, float radius);

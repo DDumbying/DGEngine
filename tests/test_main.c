@@ -707,7 +707,7 @@ static void test_allocator(void) {
     CHECK(live_allocs == 0, "%d allocations leaked", live_allocs);
 }
 
-/* A grab must die with its particle, or a new particle that reuses the id gets dragged. */
+/* A grab must die with its particle, or a new particle that reuses its slot gets dragged. */
 static void test_grab_dies_with_particle(void) {
     sl_world *w = make_world(200);
     sl_material m = sand(w), s = solid(w);
@@ -715,8 +715,8 @@ static void test_grab_dies_with_particle(void) {
     sl_grab_begin(w, a);
     sl_remove(w, a);
     sl_particle b = sl_spawn(w, m, (sl_vec3){3, 1, 0}, (sl_vec3){0, 0, 0});
-    CHECK(b == a, "id was not reused, test does not apply");
     sl_grab_move(w, a, (sl_vec3){3, 5, 0});
+    sl_grab_move(w, b, (sl_vec3){3, 5, 0});
     steps(w, 2);
     CHECK(sl_position(w, b).y < 1.0f, "new particle was dragged by an old grab: y %f", sl_position(w, b).y);
 
@@ -726,12 +726,10 @@ static void test_grab_dies_with_particle(void) {
     sl_particle end = ids[n - 1];
     sl_grab_begin(w, end);
     sl_object_destroy(w, rope);
-    int reused = 0;
-    for (int k = 0; k < n; k++) reused |= sl_spawn(w, m, (sl_vec3){-3 + 0.2f * (float)k, 1, 2}, (sl_vec3){0, 0, 0}) == end;
-    CHECK(reused, "rope id was not reused, test does not apply");
+    for (int k = 0; k < n; k++) sl_spawn(w, m, (sl_vec3){-3 + 0.2f * (float)k, 1, 2}, (sl_vec3){0, 0, 0});
     sl_grab_move(w, end, (sl_vec3){0, 6, 0});
     steps(w, 2);
-    CHECK(sl_position(w, end).y < 1.0f, "particle reusing a rope id was dragged: y %f", sl_position(w, end).y);
+    CHECK(max_height(w) < 1.0f, "particle reusing a rope slot was dragged: top %f", max_height(w));
     sl_world_destroy(w);
 }
 
@@ -793,8 +791,9 @@ static void test_clear_is_fresh(void) {
     sand_scene(b, sb);
     steps(a, 60);
     steps(b, 60);
-    float worst = 0;
-    for (int k = 0; k < sl_count(a); k++) worst = fmaxf(worst, dist(sl_position(a, k), sl_position(b, k)));
+    /* Ids differ, since a cleared world never hands out an old id again, so compare slot by slot. */
+    float worst = sl_count(a) == sl_count(b) ? 0 : 1e9f;
+    for (int k = 0; k < sl_count(a) && k < sl_count(b); k++) worst = fmaxf(worst, dist(sl_positions(a)[k], sl_positions(b)[k]));
     CHECK(sl_count(a) == sl_count(b) && worst == 0, "cleared world differs from a new one by %f", worst);
     sl_world_destroy(a);
     sl_world_destroy(b);
@@ -855,6 +854,129 @@ static void test_neighbor_search(void) {
     }
 }
 
+/* Grains still get wet when sleeping is turned off. */
+static void test_wet_without_sleep(void) {
+    sl_world_desc d = {0};
+    d.max_particles = 1000;
+    d.particle_radius = R;
+    d.gravity = (sl_vec3){0, -9.81f, 0};
+    d.sleep_speed = -1;
+    sl_world *w = sl_world_create(&d);
+    sl_material m = sand(w), wm = water(w);
+    add_floor(w, 0.5f);
+    sl_spawn_box(w, m, (sl_vec3){-0.1f, 0, -0.1f}, (sl_vec3){0.1f, 0.1f, 0.1f});
+    sl_spawn_box(w, wm, (sl_vec3){-0.1f, 0.15f, -0.1f}, (sl_vec3){0.1f, 0.35f, 0.1f});
+    steps(w, 60);
+    int soaked = 0;
+    for (int s = 0; s < sl_count(w); s++) soaked += sl_materials(w)[s] == m && sl_wetness(w)[s] > 200;
+    CHECK(soaked > 0, "no grain got wet with sleeping off");
+    sl_world_destroy(w);
+}
+
+/* A soft body more than 120 particles long still holds together: kicking one end drags its neighbor. */
+static void test_long_softbody(void) {
+    sl_world_desc d = {0};
+    d.max_particles = 1000;
+    d.particle_radius = R;
+    d.sleep_speed = -1;
+    sl_world *w = sl_world_create(&d);
+    sl_object bar = sl_softbody_create_box(w, solid(w), (sl_vec3){0, 0, 0}, (sl_vec3){0.1f * 125, 0.1f, 0.1f}, 1.0f, 0);
+    const sl_particle *ids;
+    int n = sl_object_particles(w, bar, &ids);
+    CHECK(n == 125, "bar has %d particles", n);
+    float before = sl_position(w, ids[1]).y;
+    sl_set_velocity(w, ids[0], (sl_vec3){0, 4, 0});
+    steps(w, 15);
+    float moved = sl_position(w, ids[1]).y - before;
+    CHECK(moved > 0.02f, "neighbor of a kicked end moved only %f", moved);
+    sl_world_destroy(w);
+}
+
+/* A removed particle's id stays dead even when its slot is handed out again. */
+static void test_stale_ids(void) {
+    sl_world *w = make_world(100);
+    sl_material m = sand(w);
+    sl_particle a = sl_spawn(w, m, (sl_vec3){0, 0, 0}, (sl_vec3){0, 0, 0});
+    sl_remove(w, a);
+    sl_particle b = sl_spawn(w, m, (sl_vec3){5, 5, 5}, (sl_vec3){0, 0, 0});
+    CHECK(b >= 0 && b != a, "new particle got the old id %d", b);
+    CHECK(!sl_alive(w, a), "removed id is alive again");
+    CHECK(sl_position(w, a).x == 0, "removed id reads the new particle");
+    CHECK(sl_remove(w, a) == 0 && sl_alive(w, b), "removing a stale id hit the new particle");
+    CHECK(sl_grab_begin(w, a) == 0, "grabbed through a stale id");
+
+    sl_clear(w);
+    sl_particle c = sl_spawn(w, m, (sl_vec3){1, 1, 1}, (sl_vec3){0, 0, 0});
+    CHECK(c >= 0 && !sl_alive(w, b) && sl_alive(w, c), "id from before sl_clear still alive");
+
+    sl_object rope = sl_rope_create(w, m, (sl_vec3){0, 1, 0}, (sl_vec3){1, 1, 0}, 0);
+    const sl_particle *ids;
+    int n = sl_object_particles(w, rope, &ids);
+    sl_particle end = ids[n - 1];
+    sl_object_destroy(w, rope);
+    for (int k = 0; k < n; k++) sl_spawn(w, m, (sl_vec3){(float)k, 3, 0}, (sl_vec3){0, 0, 0});
+    CHECK(!sl_alive(w, end), "rope id came back to life");
+    sl_world_destroy(w);
+}
+
+/* Plane colliders turn with their rotation: a floor turned 90 degrees about z is a wall facing -x. */
+static void test_plane_rotation(void) {
+    float turn[4] = {0, 0, 0.70710678f, 0.70710678f};
+    for (int how = 0; how < 2; how++) {
+        sl_world *w = make_world(10);
+        sl_collider_desc c = {0};
+        c.shape = SL_PLANE;
+        c.normal = (sl_vec3){0, 1, 0};
+        if (how == 0) memcpy(c.rotation, turn, sizeof turn);
+        sl_collider wall = sl_collider_add(w, &c);
+        if (how == 1) sl_collider_move(w, wall, (sl_vec3){0, 0, 0}, turn);
+        sl_particle p = sl_spawn(w, sand(w), (sl_vec3){-0.5f, 0.5f, 0}, (sl_vec3){3, 0, 0});
+        steps(w, 60);
+        sl_vec3 at = sl_position(w, p);
+        CHECK(at.x < -R * 0.9f, "%s: particle went through the wall to x=%f", how ? "move" : "add", at.x);
+        CHECK(at.y < -1.0f, "%s: old floor still holds at y=%f", how ? "move" : "add", at.y);
+        sl_world_destroy(w);
+    }
+}
+
+/* Values that would break the solver are refused instead of simulated. */
+static void test_validation(void) {
+    sl_world *w = make_world(10);
+    sl_material_desc bad[] = {
+        {.kind = SL_GRANULAR, .density = 1600, .damping = -1},
+        {.kind = SL_GRANULAR, .density = 1600, .friction = -0.5f},
+        {.kind = SL_FLUID, .density = 1000, .cohesion = -1},
+        {.kind = SL_FLUID, .density = 1000, .vorticity = -1},
+        {.kind = SL_FLUID, .density = 1000, .viscosity = -1},
+        {.kind = SL_GRANULAR, .density = 1600, .wet_cohesion = -1},
+        {.kind = SL_GRANULAR, .density = -5},
+        {.kind = SL_GRANULAR, .density = 1600, .friction = NAN},
+        {.kind = (sl_kind)7, .density = 1000},
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) CHECK(sl_material_add(w, &bad[i]) == -1, "bad material %d accepted", (int)i);
+    CHECK(sand(w) >= 0, "good material refused");
+
+    sl_collider_desc cbad[] = {
+        {.shape = (sl_shape)9},
+        {.shape = SL_SPHERE, .radius = -1},
+        {.shape = SL_SPHERE, .radius = 1, .position = {NAN, 0, 0}},
+        {.shape = SL_BOX, .half_extents = {1, -1, 1}},
+        {.shape = SL_CAPSULE, .radius = 0.1f, .half_extents = {0, INFINITY, 0}},
+        {.shape = SL_PLANE, .normal = {0, NAN, 0}},
+        {.shape = SL_SPHERE, .radius = 1, .rotation = {NAN, 0, 0, 1}},
+        {.shape = SL_SPHERE, .radius = 1, .friction = -1},
+    };
+    for (size_t i = 0; i < sizeof cbad / sizeof cbad[0]; i++) CHECK(sl_collider_add(w, &cbad[i]) == -1, "bad collider %d accepted", (int)i);
+    sl_collider ball = sl_collider_add(w, &(sl_collider_desc){.shape = SL_SPHERE, .radius = 0.5f});
+    CHECK(ball >= 0, "good collider refused");
+    float nan_rot[4] = {NAN, 0, 0, 1};
+    sl_collider_move(w, ball, (sl_vec3){0, 0, 0}, nan_rot);
+    sl_particle p = sl_spawn(w, 0, (sl_vec3){0, 0.6f, 0}, (sl_vec3){0, 0, 0});
+    steps(w, 10);
+    CHECK(all_finite(w) && sl_position(w, p).y > 0.5f, "a NaN rotation broke the collider: y=%f", sl_position(w, p).y);
+    sl_world_destroy(w);
+}
+
 typedef struct { const char *name; void (*fn)(void); } test;
 
 int main(int argc, char **argv) {
@@ -895,6 +1017,11 @@ int main(int argc, char **argv) {
         {"clear is fresh", test_clear_is_fresh},
         {"removed collider", test_removed_collider},
         {"neighbor search", test_neighbor_search},
+        {"wet without sleep", test_wet_without_sleep},
+        {"long soft body", test_long_softbody},
+        {"stale ids", test_stale_ids},
+        {"plane rotation", test_plane_rotation},
+        {"validation", test_validation},
     };
     for (size_t i = 0; i < sizeof tests / sizeof tests[0]; i++) {
         if (argc > 1 && !strstr(tests[i].name, argv[1])) continue;
