@@ -85,6 +85,8 @@ static int grow_slots(sl_world *w, int need) {
     return 1;
 }
 
+unsigned sl_version(void) { return (SLIME_VERSION_MAJOR << 16) | (SLIME_VERSION_MINOR << 8) | SLIME_VERSION_PATCH; }
+
 sl_world *sl_world_create(const sl_world_desc *desc) {
     if (!desc || desc->max_particles <= 0 || desc->particle_radius <= 0) return NULL;
 

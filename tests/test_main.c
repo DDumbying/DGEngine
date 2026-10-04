@@ -1,5 +1,6 @@
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE   /* macOS hides C11 timespec_get once _POSIX_C_SOURCE is set */
 #endif
 #include <math.h>
 #include <stdio.h>
@@ -1205,7 +1206,7 @@ static void test_object_churn(void) {
     sl_world_destroy(w);
 }
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 /* Idle workers must not burn a core each while the main thread is busy alone: the allocator below stalls the main
    thread for 200 ms inside a step, a stand-in for a long serial phase, and the process CPU time is measured. */
 static int stall_next;
@@ -1256,6 +1257,13 @@ static void test_idle_workers_block(void) {
     sl_world_destroy(w);
 }
 #endif
+
+/* The library reports the version it was built as, matching the header the caller compiled against. */
+static void test_version(void) {
+    unsigned want = (SLIME_VERSION_MAJOR << 16) | (SLIME_VERSION_MINOR << 8) | SLIME_VERSION_PATCH;
+    CHECK(sl_version() == want, "library is %06x, header is %06x", sl_version(), want);
+    CHECK(SLIME_VERSION_MAJOR == 0 && SLIME_VERSION_MINOR == 6, "header still says %d.%d", SLIME_VERSION_MAJOR, SLIME_VERSION_MINOR);
+}
 
 typedef struct { const char *name; void (*fn)(void); } test;
 
@@ -1310,7 +1318,8 @@ int main(int argc, char **argv) {
         {"hit sleeping particle", test_hit_sleeping_particle},
         {"memory stats", test_memory_stats},
         {"object churn", test_object_churn},
-#ifndef _WIN32
+        {"version", test_version},
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
         {"idle workers block", test_idle_workers_block},
 #endif
     };

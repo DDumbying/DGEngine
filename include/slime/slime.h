@@ -8,8 +8,21 @@ extern "C" {
 #endif
 
 #define SLIME_VERSION_MAJOR 0
-#define SLIME_VERSION_MINOR 5
+#define SLIME_VERSION_MINOR 6
 #define SLIME_VERSION_PATCH 0
+
+/* Shared library builds export only the public API; static builds need nothing. */
+#if defined(SLIME_SHARED) && defined(_WIN32)
+#  ifdef SLIME_BUILDING
+#    define SL_API __declspec(dllexport)
+#  else
+#    define SL_API __declspec(dllimport)
+#  endif
+#elif defined(SLIME_SHARED) && defined(__GNUC__)
+#  define SL_API __attribute__((visibility("default")))
+#else
+#  define SL_API
+#endif
 
 #define SL_MAX_MATERIALS 16
 #define SL_MAX_COLLIDERS 64
@@ -81,83 +94,86 @@ typedef struct {
     size_t memory_bytes;
 } sl_stats;
 
-sl_world *sl_world_create(const sl_world_desc *desc);
-void sl_world_destroy(sl_world *w);
+/* Version the library was built as, (major << 16) | (minor << 8) | patch, to check against the header. */
+SL_API unsigned sl_version(void);
+
+SL_API sl_world *sl_world_create(const sl_world_desc *desc);
+SL_API void sl_world_destroy(sl_world *w);
 
 /* Returns -1 when SL_MAX_MATERIALS is reached, or for an unknown kind or a negative or non-finite value. */
-sl_material sl_material_add(sl_world *w, const sl_material_desc *desc);
+SL_API sl_material sl_material_add(sl_world *w, const sl_material_desc *desc);
 
 /* Returns -1 when full or the material is invalid. */
-sl_particle sl_spawn(sl_world *w, sl_material m, sl_vec3 pos, sl_vec3 vel);
+SL_API sl_particle sl_spawn(sl_world *w, sl_material m, sl_vec3 pos, sl_vec3 vel);
 /* Fills the box with particles at rest spacing, returns how many were added. */
-int sl_spawn_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max);
+SL_API int sl_spawn_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max);
 /* Particles that belong to an object can only go with sl_object_destroy. Returns 1 on success. */
-int sl_remove(sl_world *w, sl_particle p);
-void sl_clear(sl_world *w);
+SL_API int sl_remove(sl_world *w, sl_particle p);
+SL_API void sl_clear(sl_world *w);
 
-int sl_alive(const sl_world *w, sl_particle p);
-sl_vec3 sl_position(const sl_world *w, sl_particle p);
-sl_vec3 sl_velocity(const sl_world *w, sl_particle p);
-void sl_set_position(sl_world *w, sl_particle p, sl_vec3 pos);
-void sl_set_velocity(sl_world *w, sl_particle p, sl_vec3 vel);
+SL_API int sl_alive(const sl_world *w, sl_particle p);
+SL_API sl_vec3 sl_position(const sl_world *w, sl_particle p);
+SL_API sl_vec3 sl_velocity(const sl_world *w, sl_particle p);
+SL_API void sl_set_position(sl_world *w, sl_particle p, sl_vec3 pos);
+SL_API void sl_set_velocity(sl_world *w, sl_particle p, sl_vec3 vel);
 /* A pinned particle ignores forces and is only moved by sl_set_position. */
-void sl_pin(sl_world *w, sl_particle p, int pinned);
+SL_API void sl_pin(sl_world *w, sl_particle p, int pinned);
 
 /* Returns -1 when SL_MAX_COLLIDERS is reached, or for an unknown shape or a negative or non-finite value. */
-sl_collider sl_collider_add(sl_world *w, const sl_collider_desc *desc);
+SL_API sl_collider sl_collider_add(sl_world *w, const sl_collider_desc *desc);
 /* Target transform for the next step; the collider sweeps there and pushes particles. Non-finite input is ignored. */
-void sl_collider_move(sl_world *w, sl_collider c, sl_vec3 position, const float rotation[4]);
+SL_API void sl_collider_move(sl_world *w, sl_collider c, sl_vec3 position, const float rotation[4]);
 /* Force particles put on the collider during the last step, to feed a rigid-body engine. Each particle can load
    up to four colliders at once. */
-sl_vec3 sl_collider_force(const sl_world *w, sl_collider c);
-void sl_collider_set_enabled(sl_world *w, sl_collider c, int enabled);
-int sl_collider_enabled(const sl_world *w, sl_collider c);
+SL_API sl_vec3 sl_collider_force(const sl_world *w, sl_collider c);
+SL_API void sl_collider_set_enabled(sl_world *w, sl_collider c, int enabled);
+SL_API int sl_collider_enabled(const sl_world *w, sl_collider c);
 /* The id may be handed out again by a later sl_collider_add. */
-void sl_collider_remove(sl_world *w, sl_collider c);
+SL_API void sl_collider_remove(sl_world *w, sl_collider c);
 
 /* Nearest particle hit by a ray, -1 if none; hit_dist may be NULL. */
-sl_particle sl_raycast(const sl_world *w, sl_vec3 origin, sl_vec3 dir, float max_dist, float *hit_dist);
+SL_API sl_particle sl_raycast(const sl_world *w, sl_vec3 origin, sl_vec3 dir, float max_dist, float *hit_dist);
 /* Hold a particle and move it to target each step; on release it keeps its velocity, so it can be thrown. */
-int sl_grab_begin(sl_world *w, sl_particle p);
-void sl_grab_move(sl_world *w, sl_particle p, sl_vec3 target);
-void sl_grab_end(sl_world *w, sl_particle p);
+SL_API int sl_grab_begin(sl_world *w, sl_particle p);
+SL_API void sl_grab_move(sl_world *w, sl_particle p, sl_vec3 target);
+SL_API void sl_grab_end(sl_world *w, sl_particle p);
 /* Removes loose particles inside the sphere and whole objects that reach into it; returns the count. */
-int sl_remove_sphere(sl_world *w, sl_vec3 center, float radius);
+SL_API int sl_remove_sphere(sl_world *w, sl_vec3 center, float radius);
 
 /* Compliance is softness: 0 is stiff, larger stretches more. Particles are spaced about 2 * radius. */
-sl_object sl_rope_create(sl_world *w, sl_material m, sl_vec3 a, sl_vec3 b, float compliance);
-sl_object sl_cloth_create(sl_world *w, sl_material m, sl_vec3 origin, sl_vec3 u, sl_vec3 v,
+SL_API sl_object sl_rope_create(sl_world *w, sl_material m, sl_vec3 a, sl_vec3 b, float compliance);
+SL_API sl_object sl_cloth_create(sl_world *w, sl_material m, sl_vec3 origin, sl_vec3 u, sl_vec3 v,
                           float stretch_compliance, float bend_compliance);
 /* stiffness 0..1 pulls back to shape, plasticity 0..1 keeps dents. */
-sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max,
+SL_API sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max,
                                  float stiffness, float plasticity);
-void sl_object_destroy(sl_world *w, sl_object o);
+SL_API void sl_object_destroy(sl_world *w, sl_object o);
 /* Particle ids of the object in creation order (rope from a to b, cloth row by row). */
-int sl_object_particles(const sl_world *w, sl_object o, const sl_particle **ids);
+SL_API int sl_object_particles(const sl_world *w, sl_object o, const sl_particle **ids);
 /* Cloth grid size, 0 for other objects. */
-void sl_object_grid(const sl_world *w, sl_object o, int *nu, int *nv);
+SL_API void sl_object_grid(const sl_world *w, sl_object o, int *nu, int *nv);
 
-void sl_step(sl_world *w, float dt);
+SL_API void sl_step(sl_world *w, float dt);
 
 /* Bulk access in internal order, which changes between steps; sl_ids maps each slot to its id. */
-int sl_count(const sl_world *w);
-const sl_vec3 *sl_positions(const sl_world *w);
-const sl_vec3 *sl_velocities(const sl_world *w);
-const sl_material *sl_materials(const sl_world *w);
-const sl_particle *sl_ids(const sl_world *w);
+SL_API int sl_count(const sl_world *w);
+SL_API const sl_vec3 *sl_positions(const sl_world *w);
+SL_API const sl_vec3 *sl_velocities(const sl_world *w);
+SL_API const sl_material *sl_materials(const sl_world *w);
+SL_API const sl_particle *sl_ids(const sl_world *w);
 
 /* 0 dry to 255 soaked, per slot; grains touching fluid get wet and dry over a few seconds. */
-const unsigned char *sl_wetness(const sl_world *w);
+SL_API const unsigned char *sl_wetness(const sl_world *w);
 /* Per slot: smoothed center then three ellipsoid axes, 4 vectors each; needs desc.anisotropy. */
-const sl_vec3 *sl_anisotropy(const sl_world *w);
+SL_API const sl_vec3 *sl_anisotropy(const sl_world *w);
 
 typedef enum { SL_SPRAY, SL_FOAM, SL_BUBBLE } sl_diffuse_kind;
 /* Spray, foam and bubbles thrown off by fast water; any output pointer may be NULL. */
-int sl_diffuse(const sl_world *w, const sl_vec3 **positions, const sl_vec3 **velocities, const unsigned char **kinds,
+SL_API int sl_diffuse(const sl_world *w, const sl_vec3 **positions, const sl_vec3 **velocities, const unsigned char **kinds,
                const float **life);
 
-float sl_particle_radius(const sl_world *w);
-void sl_get_stats(const sl_world *w, sl_stats *out);
+SL_API float sl_particle_radius(const sl_world *w);
+SL_API void sl_get_stats(const sl_world *w, sl_stats *out);
 
 #ifdef __cplusplus
 }

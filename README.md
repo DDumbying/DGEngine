@@ -97,12 +97,29 @@ ctest --test-dir build --output-on-failure   # headless tests
 To see where the time goes, build with `-DSLIME_PROFILE=ON` and run `slime_bench --phases`; it prints the
 cost of each solver phase on 1 and 4 threads.
 
-To use it in your own CMake project:
+To use it in your own CMake project, either add the source tree (slime's tests are then left out of your
+build):
 
 ```cmake
 add_subdirectory(slime)
-target_link_libraries(your_game PRIVATE slime)
+target_link_libraries(your_game PRIVATE slime::slime)
 ```
+
+or install it and find the package:
+
+```sh
+cmake -B build -DSLIME_BUILD_TESTS=OFF        # add -DBUILD_SHARED_LIBS=ON for a shared library
+cmake --build build
+cmake --install build --prefix /where/it/goes
+```
+
+```cmake
+find_package(slime 0.6 REQUIRED)
+target_link_libraries(your_game PRIVATE slime::slime)
+```
+
+Without CMake, `pkg-config --cflags --libs slime` gives the flags. A shared build exports only the `sl_`
+functions. `sl_version()` returns the version the library was built as, to check against the header.
 
 ### Demo
 

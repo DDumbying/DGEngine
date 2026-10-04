@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux x64 gcc, os: ubuntu-latest, cc: gcc, shared: OFF }
+          - { name: linux x64 clang, os: ubuntu-latest, cc: clang, shared: OFF }
+          - { name: linux x64 gcc shared, os: ubuntu-latest, cc: gcc, shared: ON }
+          - { name: linux arm64 gcc, os: ubuntu-24.04-arm, cc: gcc, shared: OFF }
+          - { name: macos arm64 clang, os: macos-latest, cc: clang, shared: OFF }
+          - { name: windows x64 msvc, os: windows-latest, cc: cl, shared: OFF }
+          - { name: windows x64 msvc shared, os: windows-latest, cc: cl, shared: ON }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        env:
+          CC: ${{ matrix.cc }}
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=${{ matrix.shared }}
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  sanitizers:
+    name: linux sanitizers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Address and undefined behavior
+        env:
+          CC: clang
+        run: |
+          cmake -B asan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          cmake --build asan --parallel
+          ./asan/slime_tests
+      - name: Threads
+        env:
+          CC: clang
+        run: |
+          cmake -B tsan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS="-fsanitize=thread"
+          cmake --build tsan --parallel
+          for t in "thread determinism" "custom task" "idle workers" "allocator"; do ./tsan/slime_tests "$t"; done
+
+  wasm:
+    name: webassembly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+      - name: Build
+        run: |
+          emcmake cmake -B wasm -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS="-sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=1048576"
+          cmake --build wasm --parallel
+      - name: Test
+        run: ctest --test-dir wasm --output-on-failure
+
+  consumers:
+    name: install and add_subdirectory
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DSLIME_BUILD_TESTS=OFF
+          cmake --build build --parallel
+          cmake --install build --prefix "$PWD/prefix"
+      - name: find_package
+        run: |
+          cmake -S tests/consumer -B find -DCMAKE_PREFIX_PATH="$PWD/prefix"
+          cmake --build find
+          ctest --test-dir find --output-on-failure
+      - name: pkg-config
+        run: |
+          cc tests/consumer/main.c $(PKG_CONFIG_PATH="$PWD/prefix/lib/pkgconfig" pkg-config --cflags --libs --static slime) -o pc
+          ./pc
+      - name: add_subdirectory
+        run: |
+          cmake -S tests/consumer -B sub -DSLIME_SOURCE_DIR="$PWD"
+          cmake --build sub
+          ctest --test-dir sub --output-on-failure
