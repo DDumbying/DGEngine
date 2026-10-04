@@ -152,6 +152,14 @@ SL_API void sl_collider_remove(sl_world *w, sl_collider c);
 
 /* Nearest particle hit by a ray, -1 if none; hit_dist may be NULL. */
 SL_API sl_particle sl_raycast(const sl_world *w, sl_vec3 origin, sl_vec3 dir, float max_dist, float *hit_dist);
+/* Particles whose centers lie in a region described like a collider: box, sphere, capsule or plane (the solid
+   half-space behind its normal), rotated and positioned, with inside flipping it. materials is a bit mask (bit m for material m), 0 for all. Up to cap
+   ids are written in slot order and the full count is returned; ids and out may be NULL. out gets the count,
+   total mass and mass-weighted center and velocity, enough for "is this under water", "how much sand is in the
+   bucket" or drag and buoyancy on a game's own bodies. One pass over the particles; read only. */
+typedef struct { int count; float mass; sl_vec3 center, velocity; } sl_query_result;
+SL_API int sl_query(const sl_world *w, const sl_collider_desc *shape, unsigned materials, sl_particle *ids, int cap,
+                    sl_query_result *out);
 /* Hold a particle and move it to target each step; on release it keeps its velocity, so it can be thrown. */
 SL_API int sl_grab_begin(sl_world *w, sl_particle p);
 SL_API void sl_grab_move(sl_world *w, sl_particle p, sl_vec3 target);

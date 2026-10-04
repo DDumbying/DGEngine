@@ -581,8 +581,7 @@ void sl_collider_remove(sl_world *w, sl_collider c) {
 }
 
 /* Nearest particle hit by a ray, -1 if none within max_dist. */
-sl_particle sl_raycast(const sl_world *w, sl_vec3 origin, sl_vec3 dir, float max_dist, float *hit_dist) {
-    if (!w) return -1;
+static sl_particle raycast(const sl_world *w, sl_vec3 origin, sl_vec3 dir, float max_dist, float *hit_dist) {
     float len = v3_len(dir);
     if (len < 1e-12f) return -1;
     dir = v3_scale(dir, 1.0f / len);
@@ -599,6 +598,46 @@ sl_particle sl_raycast(const sl_world *w, sl_vec3 origin, sl_vec3 dir, float max
     if (hit < 0) return -1;
     if (hit_dist) *hit_dist = best;
     return w->id[hit];
+}
+
+/* Game logic acts on what rays and queries return, so they compute in slime's float mode too. */
+sl_particle sl_raycast(const sl_world *w, sl_vec3 origin, sl_vec3 dir, float max_dist, float *hit_dist) {
+    if (!w) return -1;
+    sl_fpmode fpmode = sl_fp_enter();
+    sl_particle hit = raycast(w, origin, dir, max_dist, hit_dist);
+    sl_fp_leave(fpmode);
+    return hit;
+}
+
+int sl_query(const sl_world *w, const sl_collider_desc *shape, unsigned materials, sl_particle *ids, int cap,
+             sl_query_result *out) {
+    if (out) memset(out, 0, sizeof *out);
+    if (!w || !shape || !valid_desc(shape)) return 0;
+    sl_fpmode fpmode = sl_fp_enter();
+    collider region;
+    memset(&region, 0, sizeof region);
+    region.desc = *shape;
+    unit_normal(&region.desc);
+    region.rot = q_from(shape->rotation);
+    int n = 0;
+    float mass = 0;
+    sl_vec3 center = v3(0, 0, 0), velocity = v3(0, 0, 0), normal;
+    for (int s = 0; s < w->count; s++) {
+        if (materials && !(materials & (1u << w->mat[s]))) continue;
+        if (sl__collider_distance(&region, w->x[s], &normal) > 0) continue;
+        if (ids && n < cap) ids[n] = w->id[s];
+        n++;
+        mass += w->mass[s];
+        center = v3_madd(center, w->x[s], w->mass[s]);
+        velocity = v3_madd(velocity, w->v[s], w->mass[s]);
+    }
+    if (out) {
+        out->count = n;
+        out->mass = mass;
+        if (mass > 0) { out->center = v3_scale(center, 1.0f / mass); out->velocity = v3_scale(velocity, 1.0f / mass); }
+    }
+    sl_fp_leave(fpmode);
+    return n;
 }
 
 static int find_grab(const sl_world *w, sl_particle p) {

@@ -1815,6 +1815,86 @@ static void test_remove_many(void) {
     sl_world_destroy(w);
 }
 
+/* ---------- queries ---------- */
+
+/* Brute-force reference for queries: particles of the masked materials whose centers pass the test. */
+static int count_where(const sl_world *w, unsigned mask, int (*inside)(sl_vec3 p, const void *ctx), const void *ctx,
+                       float *mass, sl_particle *ids, int cap) {
+    int n = 0;
+    *mass = 0;
+    for (int s = 0; s < sl_count(w); s++) {
+        if (mask && !(mask & (1u << sl_materials(w)[s]))) continue;
+        if (!inside(sl_positions(w)[s], ctx)) continue;
+        if (ids && n < cap) ids[n] = sl_ids(w)[s];
+        n++;
+    }
+    return n;
+}
+static int in_sphere(sl_vec3 p, const void *ctx) { const float *c = ctx; return dist(p, (sl_vec3){c[0], c[1], c[2]}) <= c[3]; }
+static int below(sl_vec3 p, const void *ctx) { return p.y <= *(const float *)ctx; }
+static int everywhere(sl_vec3 p, const void *ctx) { (void)p; (void)ctx; return 1; }
+
+/* Which particles are where, and how much of what: shapes, masks, inside, summaries and the id buffer. */
+static void test_query(void) {
+    sl_world *w = make_world(6000);
+    add_container(w, (sl_vec3){0.6f, 0.8f, 0.6f});
+    sl_material wat = water(w), snd = sand(w);
+    sl_spawn_box(w, wat, (sl_vec3){-0.6f, -0.8f, -0.6f}, (sl_vec3){0.6f, -0.4f, 0.6f});
+    int grains = sl_spawn_box(w, snd, (sl_vec3){-0.2f, -0.2f, -0.2f}, (sl_vec3){0.2f, 0.2f, 0.2f});
+    steps(w, 200);
+    float ref_mass;
+    sl_query_result r;
+
+    /* Under water and above it. */
+    sl_collider_desc probe = {.shape = SL_SPHERE, .radius = 0.15f, .position = {0.3f, -0.7f, 0.3f}};
+    float sphere[4] = {0.3f, -0.7f, 0.3f, 0.15f};
+    int n = sl_query(w, &probe, 1u << wat, NULL, 0, &r);
+    CHECK(n > 0 && n == r.count && n == count_where(w, 1u << wat, in_sphere, sphere, &ref_mass, NULL, 0),
+          "underwater sphere found %d, brute force %d", n, count_where(w, 1u << wat, in_sphere, sphere, &ref_mass, NULL, 0));
+    CHECK(dist(r.center, probe.position) < 0.15f && fabsf(r.velocity.y) < 0.2f, "summary of resting water is off");
+    probe.position = (sl_vec3){0.4f, 0.6f, 0.4f};
+    CHECK(sl_query(w, &probe, 1u << wat, NULL, 0, &r) == 0 && r.count == 0 && r.mass == 0, "found water in the air");
+
+    /* Everything, with total mass; then only sand. */
+    sl_collider_desc all = {.shape = SL_BOX, .half_extents = {5, 5, 5}};
+    n = sl_query(w, &all, 0, NULL, 0, &r);
+    count_where(w, 0, everywhere, NULL, &ref_mass, NULL, 0);
+    float want_mass = (float)(sl_count(w) - grains) * 1000 * 0.001f + (float)grains * 1600 * 0.001f;
+    CHECK(n == sl_count(w) && fabsf(r.mass / want_mass - 1) < 1e-3f, "whole world: %d of %d, mass %f of %f", n, sl_count(w), r.mass, want_mass);
+    CHECK(sl_query(w, &all, 1u << snd, NULL, 0, NULL) == grains, "sand mask did not count the sand");
+
+    /* A plane is the solid half-space behind its normal, as for a collider; inside flips the region. */
+    sl_collider_desc floor = {.shape = SL_PLANE, .position = {0, -0.5f, 0}};
+    float level = -0.5f;
+    CHECK(sl_query(w, &floor, 0, NULL, 0, NULL) == count_where(w, 0, below, &level, &ref_mass, NULL, 0),
+          "plane query does not match the half-space below it");
+    sl_collider_desc hollow = {.shape = SL_SPHERE, .radius = 0.15f, .position = {0.3f, -0.7f, 0.3f}, .inside = 1};
+    CHECK(sl_query(w, &hollow, 0, NULL, 0, NULL) == sl_count(w) - count_where(w, 0, in_sphere, sphere, &ref_mass, NULL, 0),
+          "inside did not flip the region");
+
+    /* A rotated box holds the same particles as the same box seen in its own frame. */
+    sl_collider_desc tilted = {.shape = SL_BOX, .half_extents = {0.6f, 0.05f, 0.6f}, .position = {0, -0.6f, 0}, .rotation = {0, 0, 0.38268343f, 0.92387953f}};
+    int in_tilted = 0;
+    for (int s = 0; s < sl_count(w); s++) {
+        sl_vec3 p = sl_positions(w)[s], q = {p.x, p.y + 0.6f, p.z};
+        float c = 0.92387953f * 0.92387953f - 0.38268343f * 0.38268343f, si = 2 * 0.38268343f * 0.92387953f;   /* rotation by -45 degrees about z */
+        sl_vec3 l = {c * q.x + si * q.y, -si * q.x + c * q.y, q.z};
+        in_tilted += fabsf(l.x) <= 0.6f && fabsf(l.y) <= 0.05f && fabsf(l.z) <= 0.6f;
+    }
+    CHECK(sl_query(w, &tilted, 0, NULL, 0, NULL) == in_tilted, "rotated box found %d, expected %d", sl_query(w, &tilted, 0, NULL, 0, NULL), in_tilted);
+
+    /* Ids come in slot order, up to cap, and the full count is still returned. */
+    sl_particle got[16], want[16];
+    n = sl_query(w, &all, 1u << snd, got, 16, NULL);
+    count_where(w, 1u << snd, everywhere, NULL, &ref_mass, want, 16);
+    CHECK(n == grains && memcmp(got, want, sizeof got) == 0, "ids differ from slot order");
+
+    sl_collider_desc bad = {.shape = SL_SPHERE, .radius = -1};
+    CHECK(sl_query(w, &bad, 0, got, 16, &r) == 0 && r.count == 0, "invalid shape was queried");
+    CHECK(sl_query(w, NULL, 0, NULL, 0, NULL) == 0, "null shape was queried");
+    sl_world_destroy(w);
+}
+
 typedef struct { const char *name; void (*fn)(void); } test;
 
 int main(int argc, char **argv) {
@@ -1885,6 +1965,7 @@ int main(int argc, char **argv) {
         {"material set", test_material_set},
         {"collider set", test_collider_set},
         {"remove many", test_remove_many},
+        {"query", test_query},
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
         {"idle workers block", test_idle_workers_block},
 #endif
