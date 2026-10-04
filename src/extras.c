@@ -69,11 +69,11 @@ static void aniso_range(sl_world *w, int begin, int end, int chunk, void *ctx) {
             for (int b = 0; b < 3; b++) c[a][b] = m2[idx[a][b]] - sv[a] * mv[b] - mv[a] * sv[b] + wsum * mv[a] * mv[b];
         float val[3], vec[3][3];
         eigen3(c, val, vec);
-        float top = fmaxf(val[0], fmaxf(val[1], val[2]));
+        float top = sl_max(val[0], sl_max(val[1], val[2]));
         if (top <= 1e-12f) continue;
         float s3[3], prod = 1;
-        for (int a = 0; a < 3; a++) { s3[a] = sqrtf(fmaxf(val[a], top / 16.0f)); prod *= s3[a]; }
-        float norm = r / cbrtf(prod);
+        for (int a = 0; a < 3; a++) { s3[a] = sqrtf(sl_max(val[a], top / 16.0f)); prod *= s3[a]; }
+        float norm = r / sl_cbrt(prod);
         out[0] = v3_lerp(xi, mean, 0.9f);
         for (int a = 0; a < 3; a++) out[1 + a] = v3_scale(v3(vec[0][a], vec[1][a], vec[2][a]), s3[a] * norm);
     }
@@ -122,7 +122,9 @@ static void spawn_diffuse(sl_world *w) {
         sl_vec3 side2 = v3_cross(dir, side);
         for (int q = 0; q < spawn && w->diffuse_count < w->max_diffuse; q++) {
             float a = 6.2831853f * rand01(id, step, 11u + (unsigned)q), rad = r * sqrtf(rand01(id, step, 23u + (unsigned)q));
-            sl_vec3 off = v3_add(v3_scale(side, cosf(a) * rad), v3_scale(side2, sinf(a) * rad));
+            float sa, ca;
+            sl_sincos(a, &sa, &ca);
+            sl_vec3 off = v3_add(v3_scale(side, ca * rad), v3_scale(side2, sa * rad));
             off = v3_madd(off, vi, dt * rand01(id, step, 31u + (unsigned)q));
             int d = w->diffuse_count++;
             w->dpos[d] = v3_add(w->x[i], off);

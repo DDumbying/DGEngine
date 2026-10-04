@@ -528,7 +528,7 @@ static void rebuild_derived(sl_world *w) {
     }
 }
 
-sl_snapshot_result sl_snapshot_load(sl_world *w, const void *buf, size_t size) {
+static sl_snapshot_result load(sl_world *w, const void *buf, size_t size) {
     if (!w || !buf) return SL_SNAPSHOT_CORRUPT;
     const unsigned char *b = buf;
     if (size >= 4 && memcmp(b, "SLIM", 4) != 0) return SL_SNAPSHOT_CORRUPT;
@@ -575,4 +575,12 @@ sl_snapshot_result sl_snapshot_load(sl_world *w, const void *buf, size_t size) {
     sl__free(w, sz.obj_ids);
     sl__free(w, sz.seen);
     return result;
+}
+
+/* Rebuilding the caches does float math, so it runs in slime's float mode like a step. */
+sl_snapshot_result sl_snapshot_load(sl_world *w, const void *buf, size_t size) {
+    sl_fpmode fpmode = sl_fp_enter();
+    sl_snapshot_result r = load(w, buf, size);
+    sl_fp_leave(fpmode);
+    return r;
 }

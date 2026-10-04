@@ -47,8 +47,8 @@ static void chunk_bounds(sl_world *w, int begin, int end, int chunk, void *ctx) 
     sl_vec3 lo = w->x[begin], hi = w->x[begin], sum = w->x[begin];
     for (int s = begin + 1; s < end; s++) {
         sl_vec3 x = w->x[s];
-        lo = v3(fminf(lo.x, x.x), fminf(lo.y, x.y), fminf(lo.z, x.z));
-        hi = v3(fmaxf(hi.x, x.x), fmaxf(hi.y, x.y), fmaxf(hi.z, x.z));
+        lo = v3(sl_min(lo.x, x.x), sl_min(lo.y, x.y), sl_min(lo.z, x.z));
+        hi = v3(sl_max(hi.x, x.x), sl_max(hi.y, x.y), sl_max(hi.z, x.z));
         sum = v3_add(sum, x);
     }
     w->tmp[3 * chunk] = lo;
@@ -73,8 +73,7 @@ static void fit_cells(double n[3], double budget) {
         for (int j = i + 1; j < 3; j++)
             if (n[order[j]] < n[order[i]]) { int t = order[i]; order[i] = order[j]; order[j] = t; }
     for (int k = 0; k < 3; k++) {
-        double limit = floor(pow(budget, 1.0 / (3 - k)));
-        if (limit < 1) limit = 1;
+        double limit = sl_iroot(budget, 3 - k);
         if (n[order[k]] > limit) n[order[k]] = limit;
         budget /= n[order[k]];
     }
@@ -91,8 +90,8 @@ static int setup_grid(sl_world *w) {
     sl_vec3 lo = w->tmp[0], hi = w->tmp[1], sum = w->tmp[2];
     for (int c = 1; c < chunks; c++) {
         sl_vec3 a = w->tmp[3 * c], b = w->tmp[3 * c + 1];
-        lo = v3(fminf(lo.x, a.x), fminf(lo.y, a.y), fminf(lo.z, a.z));
-        hi = v3(fmaxf(hi.x, b.x), fmaxf(hi.y, b.y), fmaxf(hi.z, b.z));
+        lo = v3(sl_min(lo.x, a.x), sl_min(lo.y, a.y), sl_min(lo.z, a.z));
+        hi = v3(sl_max(hi.x, b.x), sl_max(hi.y, b.y), sl_max(hi.z, b.z));
         sum = v3_add(sum, w->tmp[3 * c + 2]);
     }
     /* Dense cells are half the search range and scanned 5 wide, which tests far fewer far-off particles. */
@@ -108,7 +107,7 @@ static int setup_grid(sl_world *w) {
         const float *m = &mean.x, *l = &lo.x, *h = &hi.x;
         for (int a = 0; a < 3; a++) {
             float width = (float)n[a] * cell;
-            o[a] = fmaxf(l[a], fminf(m[a] - 0.5f * width, h[a] - width));
+            o[a] = sl_max(l[a], sl_min(m[a] - 0.5f * width, h[a] - width));
         }
         sl_vec3 box[2] = {origin, v3(origin.x + (float)n[0] * cell, origin.y + (float)n[1] * cell, origin.z + (float)n[2] * cell)};
         sl__parallel(w, w->count, count_outside, box);
@@ -314,7 +313,7 @@ static void contact_range(sl_world *w, int begin, int end, int chunk, void *ctx)
             if (!c->fill) { count++; continue; }
             /* Shock propagation: the upper particle acts lighter, so piles carry their weight down.
                Only between solids; fluid below a grain must not act as a floor. */
-            float h = fminf(fmaxf(v3_dot(v3_sub(w->x[i], w->x[j]), c->up), -w->spacing), w->spacing);
+            float h = sl_min(sl_max(v3_dot(v3_sub(w->x[i], w->x[j]), c->up), -w->spacing), w->spacing);
             const sl_material_desc *mi = &w->materials[w->mat[i]], *mj = &w->materials[w->mat[j]];
             float mu = 0.5f * (mi->friction + mj->friction), dist = w->spacing;
             if (w->obj[i] >= 0 && w->obj[i] == w->obj[j]) {
@@ -324,14 +323,14 @@ static void contact_range(sl_world *w, int begin, int end, int chunk, void *ctx)
             /* Fluid against solids: no friction, and a little closer, so water can flow between grains. */
             int wet = (w->flags[i] | w->flags[j]) & F_FLUID;
             if (wet) { mu = 0; dist = 0.8f * w->spacing; }
-            *out++ = (contact){i, j, wet ? 1.0f : expf(c->shock * h), mu, dist, 0.5f * (mi->wet_cohesion + mj->wet_cohesion) / 255.0f};
+            *out++ = (contact){i, j, wet ? 1.0f : sl_exp2(h * c->shock), mu, dist, 0.5f * (mi->wet_cohesion + mj->wet_cohesion) / 255.0f};
         }
     if (!c->fill) w->chunk_buf[chunk] = count;
 }
 
 static int collect_contacts(sl_world *w) {
     float reach = w->spacing + w->skin, glen = v3_len(w->gravity);
-    contact_ctx c = {reach * reach, 0.6931f / w->spacing, glen > 0 ? v3_scale(w->gravity, -1.0f / glen) : v3(0, 0, 0), 0};
+    contact_ctx c = {reach * reach, 1.0f / w->spacing, glen > 0 ? v3_scale(w->gravity, -1.0f / glen) : v3(0, 0, 0), 0};
     int chunks = sl__chunks(w->count), n = 0;
     sl__parallel(w, w->count, contact_range, &c);
     for (int k = 0; k < chunks; k++) { int count = w->chunk_buf[k]; w->chunk_buf[k] = n; n += count; }

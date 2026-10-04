@@ -139,7 +139,7 @@ static void solve_contact_range(sl_world *w, int begin, int end, int chunk, void
         sl_vec3 tan = v3_sub(rel, v3_scale(n, v3_dot(rel, n)));
         float tl = v3_len(tan);
         if (tl <= 1e-9f) continue;
-        float f = tl < mu * pen ? 1.0f : fminf(mu * pen / tl, 1.0f);
+        float f = tl < mu * pen ? 1.0f : sl_min(mu * pen / tl, 1.0f);
         w->p[i] = v3_madd(w->p[i], tan, -f * wi / ws);
         w->p[j] = v3_madd(w->p[j], tan, f * wj / ws);
     }
@@ -293,7 +293,7 @@ void sl__fluid_step(sl_world *w) {
     for (int m = 0; m < w->material_count; m++) {
         const sl_material_desc *md = &w->materials[m];
         /* Viscosity is applied once per step, so it is compounded over the substeps it stands for. */
-        visc_step[m] = 1.0f - powf(1.0f - fminf(fmaxf(md->viscosity, 0.0f), 1.0f), (float)w->substeps);
+        visc_step[m] = 1.0f - sl_powi(1.0f - sl_min(sl_max(md->viscosity, 0.0f), 1.0f), w->substeps);
         if (md->kind != SL_FLUID) continue;
         extras |= md->viscosity > 0 || md->cohesion > 0 || md->vorticity > 0;
         vort |= md->vorticity > 0;

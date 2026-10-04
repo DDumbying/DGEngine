@@ -149,7 +149,7 @@ static void push_out(sl_world *w, int i, sl_vec3 n, float pen, sl_vec3 surf_move
     sl_vec3 tan = v3_sub(rel, v3_scale(n, v3_dot(rel, n)));
     float tl = v3_len(tan);
     if (tl > 1e-9f) {
-        float f = tl < mu * pen ? 1.0f : fminf(mu * pen / tl, 1.0f);
+        float f = tl < mu * pen ? 1.0f : sl_min(mu * pen / tl, 1.0f);
         w->p[i] = v3_madd(w->p[i], tan, -f);
     }
     sl__book_push(w, i, c, v3_scale(v3_sub(w->p[i], before), -w->mass[i] / w->hs));
@@ -166,7 +166,7 @@ static void sweep(sl_world *w, int i, const collider *col, float len) {
         sl_vec3 q = v3_madd(from, dir, t);
         float dist = sdf_local(&col->desc, q_rotate(inv, v3_sub(q, col->pos_t)), &n);
         if (dist < r) { w->p[i] = q; return; }
-        t += fmaxf(dist - r, 0.5f * r);
+        t += sl_max(dist - r, 0.5f * r);
     }
 }
 

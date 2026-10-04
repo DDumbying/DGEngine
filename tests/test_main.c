@@ -1606,6 +1606,104 @@ static void test_snapshot_ellipsoids(void) {
     sl_world_destroy(fresh);
 }
 
+/* ---------- determinism across platforms ---------- */
+
+/* Every platform, compiler and worker count must reach this hash for the golden scene. It changes only when the
+   solver changes on purpose; update it then, in the same change. */
+#define GOLDEN_HASH 0x40ee763b60af65b1ull
+
+/* Water, sand, a rope, cloth, a soft body, a moving ball and a grab. The inputs use only values that are exact
+   or a single rounding away, because this test is not compiled with the library's strict float settings. */
+static uint64_t golden_scene(int workers, int frames) {
+    sl_world_desc d = {0};
+    d.max_particles = 4000;
+    d.particle_radius = 0.05f;
+    d.gravity = (sl_vec3){0, -9.75f, 0};
+    d.workers = workers;
+    sl_world *w = sl_world_create(&d);
+    sl_material wat = sl_material_add(w, &(sl_material_desc){.kind = SL_FLUID, .density = 1000, .viscosity = 0.05f, .cohesion = 0.25f, .vorticity = 0.125f});
+    sl_material snd = sl_material_add(w, &(sl_material_desc){.kind = SL_GRANULAR, .density = 1500, .friction = 0.75f, .wet_cohesion = 0.5f});
+    sl_material sol = sl_material_add(w, &(sl_material_desc){.kind = SL_SOLID, .density = 750, .friction = 0.5f, .damping = 0.5f});
+    sl_collider_add(w, &(sl_collider_desc){.shape = SL_BOX, .position = {0, 0.5f, 0}, .half_extents = {0.5f, 0.5f, 0.5f}, .inside = 1, .friction = 0.25f});
+    float tilt[4] = {0, 0, 0.25f, 1};   /* normalized inside the library */
+    sl_collider_add(w, &(sl_collider_desc){.shape = SL_CAPSULE, .position = {0.25f, 0.125f, -0.25f}, .rotation = {tilt[0], tilt[1], tilt[2], tilt[3]}, .radius = 0.0625f, .half_extents = {0, 0.125f, 0}});
+    sl_collider ball = sl_collider_add(w, &(sl_collider_desc){.shape = SL_SPHERE, .radius = 0.125f, .position = {-0.25f, 0.25f, 0}});
+    sl_spawn_box(w, wat, (sl_vec3){-0.5f, 0, -0.5f}, (sl_vec3){0, 0.375f, 0.5f});
+    sl_spawn_box(w, snd, (sl_vec3){0.125f, 0, -0.125f}, (sl_vec3){0.375f, 0.25f, 0.25f});
+    sl_object rope = sl_rope_create(w, sol, (sl_vec3){-0.375f, 0.875f, 0.25f}, (sl_vec3){0.375f, 0.875f, 0.25f}, 0);
+    const sl_particle *ids;
+    int n = sl_object_particles(w, rope, &ids);
+    sl_pin(w, ids[0], 1);
+    sl_pin(w, ids[n - 1], 1);
+    sl_cloth_create(w, sol, (sl_vec3){-0.25f, 0.75f, -0.375f}, (sl_vec3){0.375f, 0, 0}, (sl_vec3){0, 0, 0.25f}, 0, 0.0078125f);
+    sl_object body = sl_softbody_create_box(w, sol, (sl_vec3){0.125f, 0.5f, -0.125f}, (sl_vec3){0.375f, 0.75f, 0.125f}, 0.5f, 0.25f);
+    n = sl_object_particles(w, body, &ids);
+    sl_particle held = ids[n - 1];
+    sl_grab_begin(w, held);
+    for (int f = 0; f < frames; f++) {
+        float t = (float)f * 0.0078125f;   /* exact */
+        sl_collider_move(w, ball, (sl_vec3){t - 0.25f, 0.25f, 0}, NULL);
+        sl_grab_move(w, held, (sl_vec3){0.25f, t + 0.625f, 0});
+        if (f % 16 == 0) sl_spawn(w, snd, (sl_vec3){0.25f, 0.9375f, 0}, (sl_vec3){0, -1, 0});
+        sl_step(w, 1.0f / 64.0f);
+    }
+    uint64_t h = sl_state_hash(w);
+    sl_world_destroy(w);
+    return h;
+}
+
+/* The build's floating point matches the reference: no contraction, no fast math, own math functions exact. */
+static void test_deterministic_build(void) {
+    CHECK(sl_deterministic() == 1, "this build's floating point does not match the reference");
+}
+
+/* Many engines switch on flush-to-zero; slime must compute the same anyway and hand the mode back untouched. */
+#if defined(__SSE2__) || defined(_M_X64)
+#include <xmmintrin.h>
+static unsigned host_mode_get(void) { return _mm_getcsr(); }
+static void host_mode_set(unsigned m) { _mm_setcsr(m); }
+#define HOST_FLUSH 0x8040u   /* FTZ and DAZ */
+#elif defined(__aarch64__) && defined(__GNUC__)
+static unsigned host_mode_get(void) { uint64_t v; __asm__ __volatile__("mrs %0, fpcr" : "=r"(v)); return (unsigned)v; }
+static void host_mode_set(unsigned m) { uint64_t v = m; __asm__ __volatile__("msr fpcr, %0" : : "r"(v)); }
+#define HOST_FLUSH (1u << 24)   /* FZ */
+#endif
+
+/* Particles whose positions and velocities are subnormal, which flush-to-zero would wipe out. */
+static uint64_t subnormal_scene(void) {
+    sl_world_desc d = {0};
+    d.max_particles = 16;
+    d.particle_radius = 0.05f;
+    d.sleep_speed = -1;
+    sl_world *w = sl_world_create(&d);
+    sl_material m = sl_material_add(w, &(sl_material_desc){.kind = SL_GRANULAR, .density = 1000});
+    float tiny = 3.0e-39f;
+    sl_spawn(w, m, (sl_vec3){tiny, 0, 0}, (sl_vec3){tiny, 0, 0});
+    sl_spawn(w, m, (sl_vec3){0, 0.09f, 0}, (sl_vec3){0, -0.5f, tiny});
+    sl_spawn(w, m, (sl_vec3){-tiny, 0.2f, tiny}, (sl_vec3){tiny, -1, 0});
+    for (int f = 0; f < 10; f++) sl_step(w, 1.0f / 64.0f);
+    uint64_t h = sl_state_hash(w);
+    sl_world_destroy(w);
+    return h;
+}
+
+static void test_golden_hash(void) {
+    uint64_t one = golden_scene(1, 240), four = golden_scene(4, 240);
+    CHECK(one == four, "1 worker gave %016llx, 4 workers %016llx", (unsigned long long)one, (unsigned long long)four);
+    CHECK(one == GOLDEN_HASH, "golden scene hashed to 0x%016llxull, expected 0x%016llxull",
+          (unsigned long long)one, (unsigned long long)GOLDEN_HASH);
+#ifdef HOST_FLUSH
+    uint64_t sub = subnormal_scene();
+    unsigned before = host_mode_get();
+    host_mode_set(before | HOST_FLUSH);
+    uint64_t flushed = golden_scene(2, 240), sub_flushed = subnormal_scene();
+    unsigned after = host_mode_get();
+    host_mode_set(before);
+    CHECK(flushed == one && sub_flushed == sub, "a host with flush-to-zero got different results");
+    CHECK(after == (before | HOST_FLUSH), "slime did not give the host its float mode back");
+#endif
+}
+
 typedef struct { const char *name; void (*fn)(void); } test;
 
 int main(int argc, char **argv) {
@@ -1670,6 +1768,8 @@ int main(int argc, char **argv) {
         {"state hash", test_state_hash},
         {"snapshot size", test_snapshot_size},
         {"snapshot ellipsoids", test_snapshot_ellipsoids},
+        {"deterministic build", test_deterministic_build},
+        {"golden hash", test_golden_hash},
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
         {"idle workers block", test_idle_workers_block},
 #endif

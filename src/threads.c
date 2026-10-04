@@ -27,12 +27,15 @@ typedef struct {
     int count, size;
 } range_job;
 
+/* Chunks may run on worker threads or a game's own job threads, whose float mode slime sets for the run. */
 static void run_range(int first, int last, void *ctx) {
     range_job *j = ctx;
+    sl_fpmode fpmode = sl_fp_enter();
     for (int c = first; c < last; c++) {
         int begin = c * j->size, end = begin + j->size;
         j->fn(j->w, begin, end < j->count ? end : j->count, c, j->ctx);
     }
+    sl_fp_leave(fpmode);
 }
 
 /* A job lives in one 64-bit word: generation, chunk count and next chunk to hand out. A worker claims a

@@ -43,10 +43,11 @@ set_target_properties(slime PROPERTIES
     C_VISIBILITY_PRESET hidden
     VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR})
+# Results must be bit-identical on every platform: no fused multiply-add, no fast math.
 if(MSVC)
-    target_compile_options(slime PRIVATE /W4)
+    target_compile_options(slime PRIVATE /W4 /fp:precise)
 else()
-    target_compile_options(slime PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(slime PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
     target_link_libraries(slime PUBLIC m)
 endif()
 

@@ -97,6 +97,10 @@ typedef struct {
 
 /* Version the library was built as, (major << 16) | (minor << 8) | patch, to check against the header. */
 SL_API unsigned sl_version(void);
+/* 1 when this build computes floats exactly like the reference, which bit-identical results across machines
+   need; 0 means something like fast math or fused multiply-add got into the build. slime sets round to
+   nearest without flush-to-zero while it works and restores the caller's mode afterwards. */
+SL_API int sl_deterministic(void);
 
 SL_API sl_world *sl_world_create(const sl_world_desc *desc);
 SL_API void sl_world_destroy(sl_world *w);
