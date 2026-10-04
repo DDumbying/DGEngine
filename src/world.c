@@ -184,16 +184,58 @@ void sl_world_destroy(sl_world *w) {
 /* Finite and not negative; negative coefficients would feed energy into the solver. */
 static int non_negative(float v) { return isfinite(v) && v >= 0; }
 
-sl_material sl_material_add(sl_world *w, const sl_material_desc *desc) {
-    if (!w || !desc || w->material_count >= SL_MAX_MATERIALS) return -1;
-    sl_material_desc m = *desc;
+/* A checked copy of a material description with defaults filled in; 0 if it is not valid. */
+static int material_desc(const sl_material_desc *in, sl_material_desc *out) {
+    sl_material_desc m = *in;
     if ((m.kind != SL_FLUID && m.kind != SL_GRANULAR && m.kind != SL_SOLID) || !non_negative(m.density)
         || !non_negative(m.viscosity) || !non_negative(m.cohesion) || !non_negative(m.friction)
-        || !non_negative(m.vorticity) || !non_negative(m.damping) || !non_negative(m.wet_cohesion)) return -1;
+        || !non_negative(m.vorticity) || !non_negative(m.damping) || !non_negative(m.wet_cohesion)) return 0;
     if (m.density <= 0) m.density = 1000.0f;
-    w->materials[w->material_count] = m;
+    *out = m;
+    return 1;
+}
+
+sl_material sl_material_add(sl_world *w, const sl_material_desc *desc) {
+    if (!w || !desc || w->material_count >= SL_MAX_MATERIALS || !material_desc(desc, &w->materials[w->material_count])) return -1;
     return w->material_count++;
 }
+
+int sl_material_get(const sl_world *w, sl_material m, sl_material_desc *out) {
+    if (!w || !out || m < 0 || m >= w->material_count) return 0;
+    *out = w->materials[m];
+    return 1;
+}
+
+/* Every particle of the material follows the change: its mass from the density, and loose ones the kind;
+   particles of ropes, cloth and soft bodies stay solid. They wake, and contacts are rebuilt, since friction
+   and stickiness are cached in them. */
+int sl_material_set(sl_world *w, sl_material m, const sl_material_desc *desc) {
+    sl_material_desc d;
+    if (!w || !desc || m < 0 || m >= w->material_count || !material_desc(desc, &d)) return 0;
+    w->materials[m] = d;
+    float mass = d.density * w->spacing * w->spacing * w->spacing;
+    for (int s = 0; s < w->count; s++) {
+        if (w->mat[s] != m) continue;
+        w->mass[s] = mass;
+        w->inv_mass[s] = (w->flags[s] & F_KINEMATIC) ? 0.0f : 1.0f / mass;
+        if (w->obj[s] < 0) {
+            if (d.kind == SL_FLUID) w->flags[s] |= F_FLUID;
+            else w->flags[s] &= (unsigned char)~F_FLUID;
+        }
+        w->calm[s] = 0;
+    }
+    w->need_rebuild = 1;
+    return 1;
+}
+
+void sl_set_gravity(sl_world *w, sl_vec3 gravity) {
+    if (!w || !v3_finite(gravity)) return;
+    w->gravity = gravity;
+    w->wake_all = 1;       /* sleeping particles must feel it */
+    w->need_rebuild = 1;   /* contacts cache which way is up */
+}
+
+sl_vec3 sl_gravity(const sl_world *w) { return w ? w->gravity : v3(0, 0, 0); }
 
 int sl__slot_of(const sl_world *w, sl_particle p) {
     if (!w || p < 0 || id_index(w, p) >= w->next_id) return -1;
@@ -374,6 +416,16 @@ int sl__remove_doomed(sl_world *w, const sl_vec3 *center, float radius) {
     return remove_marked(w);
 }
 
+int sl_remove_many(sl_world *w, const sl_particle *ids, int count) {
+    if (!w || !ids || count <= 0) return 0;
+    memset(w->mark, 0, (size_t)w->count);
+    for (int k = 0; k < count; k++) {
+        int s = sl__slot_of(w, ids[k]);
+        if (s >= 0 && w->obj[s] < 0) w->mark[s] = 1;
+    }
+    return remove_marked(w);
+}
+
 int sl_remove(sl_world *w, sl_particle p) {
     int s = sl__slot_of(w, p);
     if (s < 0 || w->obj[s] >= 0) return 0;
@@ -463,6 +515,12 @@ static int valid_desc(const sl_collider_desc *d) {
         && non_negative(e.x) && non_negative(e.y) && non_negative(e.z) && non_negative(d->radius) && non_negative(d->friction);
 }
 
+static void unit_normal(sl_collider_desc *d) {
+    if (d->shape != SL_PLANE) return;
+    float len = v3_len(d->normal);
+    d->normal = len > 0 ? v3_scale(d->normal, 1.0f / len) : v3(0, 1, 0);
+}
+
 sl_collider sl_collider_add(sl_world *w, const sl_collider_desc *desc) {
     if (!w || !desc || !valid_desc(desc)) return -1;
     int slot = 0;
@@ -472,11 +530,7 @@ sl_collider sl_collider_add(sl_world *w, const sl_collider_desc *desc) {
     memset(c, 0, sizeof *c);
     c->enabled = 1;
     c->desc = *desc;
-    if (c->desc.shape == SL_PLANE) {
-        sl_vec3 n = c->desc.normal;
-        float len = v3_len(n);
-        c->desc.normal = len > 0 ? v3_scale(n, 1.0f / len) : v3(0, 1, 0);
-    }
+    unit_normal(&c->desc);
     c->rot = c->prev_rot = q_from(desc->rotation);
     c->prev_pos = desc->position;
     queue_collider_wake(w, &c->desc, desc->position, desc->position, w->h);
@@ -486,6 +540,19 @@ sl_collider sl_collider_add(sl_world *w, const sl_collider_desc *desc) {
 
 static int valid_collider(const sl_world *w, sl_collider c) {
     return w && c >= 0 && c < w->collider_count && !w->colliders[c].removed;
+}
+
+/* Shape, size, normal, inside and friction change at once; position and rotation become the target, as
+   with sl_collider_move, so the collider sweeps there. What the old and new shapes reach wakes. */
+int sl_collider_set(sl_world *w, sl_collider c, const sl_collider_desc *desc) {
+    if (!valid_collider(w, c) || !desc || !valid_desc(desc)) return 0;
+    collider *col = &w->colliders[c];
+    queue_collider_wake(w, &col->desc, col->prev_pos, col->desc.position, w->h);
+    col->desc = *desc;
+    unit_normal(&col->desc);
+    col->rot = q_from(desc->rotation);
+    queue_collider_wake(w, &col->desc, col->prev_pos, col->desc.position, w->h);
+    return 1;
 }
 
 static void wake_collider(sl_world *w, sl_collider c) {

@@ -1704,6 +1704,117 @@ static void test_golden_hash(void) {
 #endif
 }
 
+/* ---------- runtime control ---------- */
+
+/* Gravity can change while the world runs, and sleeping particles feel it. */
+static void test_set_gravity(void) {
+    sl_world *w = sleeping_pile(3000);
+    sl_stats st;
+    sl_get_stats(w, &st);
+    CHECK(st.awake == 0, "pile did not sleep, test does not apply");
+    sl_vec3 g = {-12, -4, 0};   /* well past the friction angle, so the pile must slide */
+    sl_set_gravity(w, g);
+    sl_vec3 back = sl_gravity(w);
+    CHECK(back.x == g.x && back.y == g.y && back.z == g.z, "sl_gravity does not report the new gravity");
+    float before = 0;
+    for (int s = 0; s < sl_count(w); s++) before += sl_positions(w)[s].x / (float)sl_count(w);
+    steps(w, 60);
+    float after = 0;
+    for (int s = 0; s < sl_count(w); s++) after += sl_positions(w)[s].x / (float)sl_count(w);
+    CHECK(after < before - 0.1f, "the pile did not slide with sideways gravity: %f to %f", before, after);
+    sl_set_gravity(w, (sl_vec3){NAN, 0, 0});
+    CHECK(sl_gravity(w).x == g.x, "a NaN gravity was accepted");
+    sl_world_destroy(w);
+}
+
+/* Materials can change while the world runs: sand turned to water flows out, a cork made heavy sinks, and
+   ropes made of a material that turns fluid stay ropes. */
+static void test_material_set(void) {
+    sl_world *w = make_world(3000);
+    add_floor(w, 0.6f);
+    sl_material m = sand(w);
+    sl_spawn_box(w, m, (sl_vec3){-0.3f, 0, -0.3f}, (sl_vec3){0.3f, 0.5f, 0.3f});
+    steps(w, 120);
+    float tall = max_height(w);
+    sl_material_desc d;
+    CHECK(sl_material_get(w, m, &d) && d.kind == SL_GRANULAR && d.density == 1600, "sl_material_get does not report the material");
+    d.kind = SL_FLUID;
+    d.viscosity = 0.01f;
+    CHECK(sl_material_set(w, m, &d) == 1, "valid change refused");
+    steps(w, 240);
+    CHECK(max_height(w) < 0.5f * tall, "sand turned to water did not flow: %f, was %f", max_height(w), tall);
+    sl_material_desc bad = d;
+    bad.damping = -1;
+    CHECK(sl_material_set(w, m, &bad) == 0 && sl_material_set(w, 99, &d) == 0, "invalid changes accepted");
+    CHECK(sl_material_get(w, m, &d) && d.damping == 0, "a refused change altered the material");
+    sl_world_destroy(w);
+
+    w = make_world(8000);
+    add_container(w, (sl_vec3){0.6f, 0.8f, 0.6f});
+    sl_spawn_box(w, water(w), (sl_vec3){-0.6f, -0.8f, -0.6f}, (sl_vec3){0.6f, 0.0f, 0.6f});
+    sl_material cork = sl_material_add(w, &(sl_material_desc){.kind = SL_SOLID, .density = 500, .friction = 0.3f, .damping = 1});
+    sl_object body = sl_softbody_create_box(w, cork, (sl_vec3){-0.15f, 0.1f, -0.15f}, (sl_vec3){0.15f, 0.4f, 0.15f}, 1, 0);
+    steps(w, 300);
+    const sl_particle *ids;
+    int n = sl_object_particles(w, body, &ids);
+    float floating = 0;
+    for (int i = 0; i < n; i++) floating += sl_position(w, ids[i]).y / (float)n;
+    sl_material_desc heavy = {.kind = SL_FLUID, .density = 3000, .friction = 0.3f, .damping = 1};
+    CHECK(sl_material_set(w, cork, &heavy) == 1, "change refused");
+    steps(w, 300);
+    float sunk = 0;
+    for (int i = 0; i < n; i++) sunk += sl_position(w, ids[i]).y / (float)n;
+    CHECK(sunk < floating - 0.3f, "the cork made heavy did not sink: %f, floated at %f", sunk, floating);
+    float hi = -1e9f, lo = 1e9f;
+    for (int i = 0; i < n; i++) { float y = sl_position(w, ids[i]).y; hi = fmaxf(hi, y); lo = fminf(lo, y); }
+    CHECK(hi - lo < 0.45f, "the body's particles turned fluid and spread: %f tall", hi - lo);
+    sl_world_destroy(w);
+}
+
+/* A collider's shape and size can change while the world runs. */
+static void test_collider_set(void) {
+    sl_world *w = make_world(3000);
+    sl_collider_desc table = {.shape = SL_BOX, .position = {0, -0.1f, 0}, .half_extents = {0.6f, 0.1f, 0.6f}, .friction = 0.6f};
+    sl_collider c = sl_collider_add(w, &table);
+    sl_spawn_box(w, sand(w), (sl_vec3){-0.4f, 0, -0.4f}, (sl_vec3){0.4f, 0.2f, 0.4f});
+    steps(w, 120);
+    CHECK(max_height(w) > 0.1f, "sand fell off the table, test does not apply");
+    sl_collider_desc small = table;
+    small.half_extents = (sl_vec3){0.1f, 0.1f, 0.1f};
+    CHECK(sl_collider_set(w, c, &small) == 1, "valid change refused");
+    sl_collider_desc bad = table;
+    bad.radius = -1;
+    CHECK(sl_collider_set(w, c, &bad) == 0 && sl_collider_set(w, 40, &table) == 0, "invalid changes accepted");
+    steps(w, 90);
+    int fell = 0;
+    for (int s = 0; s < sl_count(w); s++) fell += sl_positions(w)[s].y < -0.5f;
+    CHECK(fell > sl_count(w) / 2, "only %d of %d grains fell off the shrunken table", fell, sl_count(w));
+    sl_world_destroy(w);
+}
+
+/* Many particles go in one call, without one compaction each, and object particles are left alone. */
+static void test_remove_many(void) {
+    sl_world *w = make_world(25000);
+    sl_material m = sand(w);
+    int sand_n = sl_spawn_box(w, m, (sl_vec3){-1, 0, -1}, (sl_vec3){1, 5, 1});
+    sl_object rope = sl_rope_create(w, solid(w), (sl_vec3){-1, 6, 0}, (sl_vec3){1, 6, 0}, 0);
+    int before = sl_count(w), n = 0;
+    sl_particle *doomed = malloc(sizeof(sl_particle) * 12000);
+    for (int s = 0; s < sand_n; s += 2) doomed[n++] = sl_ids(w)[s];   /* slots are still in spawn order */
+    const sl_particle *rope_ids;
+    sl_object_particles(w, rope, &rope_ids);
+    doomed[n++] = rope_ids[0];
+    doomed[n++] = doomed[0];   /* a repeat counts once */
+    double t = wall_now();
+    int gone = sl_remove_many(w, doomed, n);
+    t = wall_now() - t;
+    CHECK(gone == n - 2 && sl_count(w) == before - gone, "removed %d of %d loose particles, count %d of %d", gone, n - 2, sl_count(w), before);
+    CHECK(sl_alive(w, rope_ids[0]) && !sl_alive(w, doomed[1]), "wrong particles survived");
+    CHECK(t < 0.01, "removing %d particles took %.1f ms", gone, t * 1000);
+    free(doomed);
+    sl_world_destroy(w);
+}
+
 typedef struct { const char *name; void (*fn)(void); } test;
 
 int main(int argc, char **argv) {
@@ -1770,6 +1881,10 @@ int main(int argc, char **argv) {
         {"snapshot ellipsoids", test_snapshot_ellipsoids},
         {"deterministic build", test_deterministic_build},
         {"golden hash", test_golden_hash},
+        {"set gravity", test_set_gravity},
+        {"material set", test_material_set},
+        {"collider set", test_collider_set},
+        {"remove many", test_remove_many},
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
         {"idle workers block", test_idle_workers_block},
 #endif

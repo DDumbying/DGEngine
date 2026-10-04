@@ -107,6 +107,14 @@ SL_API void sl_world_destroy(sl_world *w);
 
 /* Returns -1 when SL_MAX_MATERIALS is reached, or for an unknown kind or a negative or non-finite value. */
 SL_API sl_material sl_material_add(sl_world *w, const sl_material_desc *desc);
+/* Changes a material for every particle made of it while the world runs: density changes their mass, kind
+   changes how loose particles behave (particles of ropes, cloth and soft bodies stay solid). Validated like
+   sl_material_add; returns 1 on success, 0 leaving the material unchanged. */
+SL_API int sl_material_set(sl_world *w, sl_material m, const sl_material_desc *desc);
+SL_API int sl_material_get(const sl_world *w, sl_material m, sl_material_desc *out);
+/* Gravity can change at any time; sleeping particles wake to feel it. Non-finite values are ignored. */
+SL_API void sl_set_gravity(sl_world *w, sl_vec3 gravity);
+SL_API sl_vec3 sl_gravity(const sl_world *w);
 
 /* Returns -1 when full or the material is invalid. */
 SL_API sl_particle sl_spawn(sl_world *w, sl_material m, sl_vec3 pos, sl_vec3 vel);
@@ -114,6 +122,9 @@ SL_API sl_particle sl_spawn(sl_world *w, sl_material m, sl_vec3 pos, sl_vec3 vel
 SL_API int sl_spawn_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max);
 /* Particles that belong to an object can only go with sl_object_destroy. Returns 1 on success. */
 SL_API int sl_remove(sl_world *w, sl_particle p);
+/* Removes many loose particles in one pass, which is much cheaper than sl_remove in a loop; ids that are dead,
+   repeated or belong to an object are skipped. Returns how many went. */
+SL_API int sl_remove_many(sl_world *w, const sl_particle *ids, int count);
 SL_API void sl_clear(sl_world *w);
 
 SL_API int sl_alive(const sl_world *w, sl_particle p);
@@ -126,6 +137,9 @@ SL_API void sl_pin(sl_world *w, sl_particle p, int pinned);
 
 /* Returns -1 when SL_MAX_COLLIDERS is reached, or for an unknown shape or a negative or non-finite value. */
 SL_API sl_collider sl_collider_add(sl_world *w, const sl_collider_desc *desc);
+/* Changes shape, size, normal, inside and friction at once; position and rotation become the target for the
+   next step, as with sl_collider_move. Validated like sl_collider_add; returns 1 on success, 0 otherwise. */
+SL_API int sl_collider_set(sl_world *w, sl_collider c, const sl_collider_desc *desc);
 /* Target transform for the next step; the collider sweeps there and pushes particles. Non-finite input is ignored. */
 SL_API void sl_collider_move(sl_world *w, sl_collider c, sl_vec3 position, const float rotation[4]);
 /* Force particles put on the collider during the last step, to feed a rigid-body engine. Each particle can load
