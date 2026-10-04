@@ -304,7 +304,7 @@ typedef struct { float reach2, shock; sl_vec3 up; int fill; } contact_ctx;
    chunk's offset, so the order never depends on threads. */
 static void contact_range(sl_world *w, int begin, int end, int chunk, void *ctx) {
     contact_ctx *c = ctx;
-    contact *out = c->fill ? w->contact_tmp + w->chunk_buf[chunk] : NULL;   /* no buffer yet while counting */
+    contact *out = c->fill ? w->contact_tmp + w->chunk_buf[chunk] : NULL;   /* no buffer while counting */
     int count = 0;
     for (int i = begin; i < end; i++)
         for (int k = w->nbr_off[i]; k < w->nbr_off[i + 1]; k++) {
@@ -336,9 +336,10 @@ static int collect_contacts(sl_world *w) {
     for (int k = 0; k < chunks; k++) { int count = w->chunk_buf[k]; w->chunk_buf[k] = n; n += count; }
     if (!sl__grow(w, (void **)&w->contact_tmp, &w->contact_tmp_cap, n, sizeof(contact))
         || !sl__grow(w, (void **)&w->contacts, &w->contact_cap, n, sizeof(contact))) return 0;
+    w->contact_count = n;
+    if (!n) return 1;   /* nothing to fill, and the buffers may not exist yet */
     c.fill = 1;
     sl__parallel(w, w->count, contact_range, &c);
-    w->contact_count = n;
     return 1;
 }
 
