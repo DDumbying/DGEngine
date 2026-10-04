@@ -19,7 +19,7 @@ typedef struct { float x, y, z; } sl_vec3;
 typedef struct sl_world sl_world;
 typedef int sl_material;
 typedef int sl_collider;
-typedef int sl_object;
+typedef int sl_object;     /* stays dead once destroyed, even after its slot is reused or the world is cleared */
 typedef int sl_particle;   /* stable id, valid until the particle is removed; after that it reads as dead, even
                               once the particle's slot is reused or the world is cleared */
 

@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include "internal.h"
@@ -10,13 +11,14 @@ void sl__free(sl_world *w, void *ptr) { if (ptr) w->alloc.free(ptr, w->alloc.use
 
 int sl__grow(sl_world *w, void **ptr, int *cap, int need, size_t elem) {
     if (need <= *cap) return 1;
-    int n = *cap > 0 ? *cap : 64;
+    long long n = *cap > 0 ? *cap : 64;   /* wide, so doubling past 2^30 cannot overflow */
     while (n < need) n *= 2;
+    if (n > INT_MAX) n = need;
     void *mem = sl__alloc(w, (size_t)n * elem);
     if (!mem) return 0;
     if (*ptr) { memcpy(mem, *ptr, (size_t)*cap * elem); sl__free(w, *ptr); }
     *ptr = mem;
-    *cap = n;
+    *cap = (int)n;
     return 1;
 }
 
@@ -58,24 +60,26 @@ static int slot_arrays(sl_world *w, slot_array *out) {
 static int grow_slots(sl_world *w, int need) {
     if (need <= w->cap) return 1;
     if (need > w->max_particles) return 0;
-    int n = w->cap > 0 ? w->cap : 1024;
-    while (n < need) n *= 2;
+    long long grown = w->cap > 0 ? w->cap : 1024;   /* wide, so doubling past 2^30 cannot overflow */
+    while (grown < need) grown *= 2;
     /* At least 16 slots, since some per-slot arrays double as per-chunk scratch (3 entries per chunk). */
-    if (n > w->max_particles) n = w->max_particles > 16 ? w->max_particles : 16;
+    if (grown > w->max_particles) grown = w->max_particles > 16 ? w->max_particles : 16;
+    int n = (int)grown;
 
     slot_array arrays[32];
     int count = slot_arrays(w, arrays);
     for (int i = 0; i < count; i++) {
-        size_t old = (size_t)(w->cap + arrays[i].extra) * arrays[i].elem;
-        void *mem = sl__alloc(w, (size_t)(n + arrays[i].extra) * arrays[i].elem);
+        size_t old = ((size_t)w->cap + (size_t)arrays[i].extra) * arrays[i].elem;
+        size_t size = ((size_t)n + (size_t)arrays[i].extra) * arrays[i].elem;
+        void *mem = sl__alloc(w, size);
         if (!mem) return 0;
         if (*arrays[i].ptr) { memcpy(mem, *arrays[i].ptr, old); sl__free(w, *arrays[i].ptr); }
-        else memset(mem, 0, (size_t)(n + arrays[i].extra) * arrays[i].elem);
+        else memset(mem, 0, size);
         *arrays[i].ptr = mem;
     }
 
     int table = 1024;
-    while (table < 2 * n) table <<= 1;
+    while (table < (1 << 30) && table < 2LL * n) table <<= 1;
     w->g.table_size = table;
     w->cap = n;
     return 1;
@@ -351,8 +355,14 @@ int sl_remove(sl_world *w, sl_particle p) {
 
 void sl_clear(sl_world *w) {
     if (!w) return;
-    for (int i = 0; i < w->object_count; i++) sl__free(w, w->objects[i].ids);
-    w->object_count = w->dist_count = w->cluster_count = w->member_count = 0;
+    /* Object slots stay, emptied, so their generations keep handles from before the clear dead. */
+    for (int i = 0; i < w->object_count; i++) {
+        sl__free(w, w->objects[i].ids);
+        int gen = w->objects[i].gen;
+        memset(&w->objects[i], 0, sizeof(object));
+        w->objects[i].gen = gen;
+    }
+    w->dist_count = w->cluster_count = w->member_count = 0;
     memset(w->dist_color_off, 0, sizeof w->dist_color_off);
     memset(w->color_off, 0, sizeof w->color_off);
     /* Ids go back on the free list rather than starting over, so handles from before the clear stay dead. */
@@ -690,12 +700,13 @@ void sl_get_stats(const sl_world *w, sl_stats *out) {
     slot_array arrays[32];
     int count = slot_arrays((sl_world *)w, arrays);   /* only reads the table, nothing is written */
     size_t bytes = sizeof *w;
-    for (int i = 0; i < count; i++) bytes += (size_t)(w->cap + arrays[i].extra) * arrays[i].elem;
+    for (int i = 0; i < count; i++) bytes += ((size_t)w->cap + (size_t)arrays[i].extra) * arrays[i].elem;
     bytes += (size_t)w->g.start_cap * sizeof(int) + (size_t)w->nbr_cap * sizeof(int) + (size_t)w->nbr_r_cap * sizeof(float)
         + (size_t)(w->contact_cap + w->contact_tmp_cap) * sizeof(contact) + (size_t)w->island_cap * sizeof(int)
         + (size_t)w->mem_list_cap * sizeof(int) + (size_t)(w->dist_cap + w->dist_tmp_cap) * sizeof(dist_con)
         + (size_t)w->dist_lambda_cap * sizeof(float) + (size_t)w->member_cap * sizeof(member)
         + (size_t)w->cluster_cap * sizeof(cluster) + (size_t)w->color_cap + (size_t)w->chunk_cap * sizeof(int)
-        + (size_t)w->max_diffuse * (2 * sizeof(sl_vec3) + sizeof(float) + 1);
+        + (size_t)w->max_diffuse * (2 * sizeof(sl_vec3) + sizeof(float) + 1) + (size_t)w->object_cap * sizeof(object);
+    for (int o = 0; o < w->object_count; o++) if (w->objects[o].ids) bytes += (size_t)w->objects[o].count * sizeof(sl_particle);
     out->memory_bytes = bytes;
 }
