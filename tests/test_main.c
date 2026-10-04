@@ -1341,7 +1341,8 @@ static void test_snapshot_rollback(void) {
     size_t size;
     void *snap = take_snapshot(w, &size);
     uint64_t at_save = sl_state_hash(w);
-    for (int f = 90; f < 150; f++) busy_inputs(w, &h, f);
+    uint64_t frames[60];   /* every frame, since some state can differ for a while and then heal */
+    for (int f = 90; f < 150; f++) { busy_inputs(w, &h, f); frames[f - 90] = sl_state_hash(w); }
     uint64_t first = sl_state_hash(w);
     int count = sl_count(w);
     sl_vec3 *pos = malloc(sizeof(sl_vec3) * (size_t)count);
@@ -1349,7 +1350,9 @@ static void test_snapshot_rollback(void) {
 
     CHECK(sl_snapshot_load(w, snap, size) == SL_SNAPSHOT_OK, "load failed");
     CHECK(sl_state_hash(w) == at_save, "restored state hashes differently from the saved one");
-    for (int f = 90; f < 150; f++) busy_inputs(w, &h, f);
+    int diverged = -1;
+    for (int f = 90; f < 150; f++) { busy_inputs(w, &h, f); if (diverged < 0 && sl_state_hash(w) != frames[f - 90]) diverged = f; }
+    CHECK(diverged < 0, "replay after a rollback diverged at frame %d", diverged);
     CHECK(sl_state_hash(w) == first && sl_count(w) == count
           && memcmp(sl_positions(w), pos, sizeof(sl_vec3) * (size_t)count) == 0, "replay after a rollback diverged");
     CHECK(sl_object_particles(w, h.rope, NULL) > 0 && sl_alive(w, h.grabbed) && sl_collider_enabled(w, h.ball),
@@ -1610,7 +1613,7 @@ static void test_snapshot_ellipsoids(void) {
 
 /* Every platform, compiler and worker count must reach this hash for the golden scene. It changes only when the
    solver changes on purpose; update it then, in the same change. */
-#define GOLDEN_HASH 0x40ee763b60af65b1ull
+#define GOLDEN_HASH 0x9745005ceb8487feull
 
 /* Water, sand, a rope, cloth, a soft body, a moving ball and a grab. The inputs use only values that are exact
    or a single rounding away, because this test is not compiled with the library's strict float settings. */

@@ -57,7 +57,8 @@ static void fluid_delta(sl_world *w, int begin, int end, int chunk, void *ctx) {
         w->delta[i] = v3(0, 0, 0);
         sl_vec3 dp = v3(0, 0, 0), pi = w->p[i];
         if (!(w->flags[i] & F_FLUID)) {
-            if (w->flags[i] & F_KINEMATIC) continue;
+            /* Grabbed and pinned solids get wet too; apply_delta ignores their push. Skipping them left a stale
+               near_fluid, which a restored world could not reproduce. */
             float wet2 = 1.44f * w->spacing * w->spacing;
             /* Other threads read flags[i] in this pass, so wetness goes to its own byte first. */
             w->near_fluid[i] = 0;
