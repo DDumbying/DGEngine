@@ -39,12 +39,14 @@ free, portable, engine-agnostic option that you can network:
 |---|---|
 | Fluids | Position based fluids, viscosity, cohesion, vorticity, walls that hold water at rest density |
 | Granular | Friction sets the pile angle, shock propagation, settles still; wet grains darken and stick |
-| Ropes and cloth | Distance and bending constraints with compliance, pinning |
-| Soft bodies | Shape matching with stiffness and plasticity, so they can keep dents |
+| Ropes and cloth | Ropes along any path; cloth with stretch and bending constraints; compliance, pinning |
+| Soft bodies | Boxes or any set of points; shape matching with stiffness and plasticity, so they can keep dents |
 | Two-way coupling | Water pushes solids: light bodies float, heavy ones sink, cloth gets pushed |
 | Colliders | Plane, box, sphere, capsule; moving and rotating; boxes can be containers |
 | Collider forces | Read the force particles put on each collider and feed it to a rigid-body engine |
 | Interaction | Ray picking, grab and throw any particle, enable or remove colliders, erase a region |
+| Runtime control | Change gravity, materials and collider shapes while the world runs; remove many particles at once |
+| Queries | Which particles are in a region, and their count, mass, center and velocity, by material |
 | Water surface | Per-particle ellipsoids (anisotropy) so renderers draw flat sheets instead of balls |
 | Spray and foam | Diffuse particles thrown off by fast water: spray, foam riding the surface, rising bubbles |
 | Stable ids | Particle handles stay valid while memory is reordered for speed |
@@ -52,7 +54,7 @@ free, portable, engine-agnostic option that you can network:
 | Determinism | Same bits on x86-64, ARM64 and WebAssembly with GCC, Clang and MSVC; checked in CI |
 | Snapshots | Compact, portable, restore bit-exactly; a state hash per step catches desyncs |
 | Threads | Built-in pool, or plug in your own job system |
-| Robustness | Swept tests stop tunneling, overlaps are removed without launching particles, bad values are caught |
+| Robustness | Particles are swept in each collider's frame, so neither fast particles nor fast colliders pass through; overlaps are removed without launching particles; bad values are refused |
 
 ## Example
 
@@ -159,6 +161,42 @@ cmake --build build-demo
 | Right drag, middle drag, wheel | Orbit, pan, zoom |
 | `Shift` + wheel, `[` `]` | Brush size |
 | `F1` to `F4`, `F5` | Example scenes, back to the empty sandbox |
+
+## Gameplay
+
+The world can change while it runs, and you can ask it what is where:
+
+```c
+sl_set_gravity(world, (sl_vec3){0, 0, -9.81f});              /* the level tips over */
+
+sl_material_desc lava;
+sl_material_get(world, water, &lava);
+lava.viscosity = 0.6f;
+sl_material_set(world, water, &lava);                         /* every water particle thickens */
+
+sl_collider_desc door = {.shape = SL_BOX, .position = {0, 1, 0}, .half_extents = {0.1f, 1, 0.05f}};
+sl_collider_set(world, gate, &door);                          /* new size; it sweeps there */
+
+/* How much water is around the player, and which way is it flowing? */
+sl_collider_desc near = {.shape = SL_SPHERE, .position = {px, py, pz}, .radius = 0.5f};
+sl_query_result q;
+sl_query(world, &near, 1u << water, NULL, 0, &q);
+if (q.mass > 20) { /* wading: q.velocity is the current */ }
+```
+
+A query region is described like a collider: box, sphere, capsule or plane (the solid side), rotated and
+positioned, with `inside` flipping it. It returns ids in a stable order and a mass-weighted summary, and
+runs in slime's float mode so game logic built on it stays deterministic. `sl_remove_many` removes a list
+of particles in one pass.
+
+Ropes can follow any path and soft bodies can take any shape, given particle positions about two radii
+apart, for example a mesh sampled on a lattice:
+
+```c
+sl_vec3 path[] = {{0, 2, 0}, {1, 2, 0}, {1, 2, 1}};
+sl_object rope = sl_rope_create_path(world, cord, path, 3, 0);
+sl_object blob = sl_softbody_create(world, jelly, points, point_count, 0.3f, 0.1f);
+```
 
 ## Multiplayer: lockstep and rollback
 
@@ -267,6 +305,10 @@ passes are what is left to make cheaper.
   before it sleeps.
 - Grains do not spin, so friction alone sets how steep a pile gets (about 40 degrees at 1.0).
 - Particles that belong to a rope, cloth or soft body are removed with `sl_object_destroy`.
+- Settled grains in contact hold still while they move slower than the sleep speed, which stops position
+  based dynamics from letting piles creep. As a result, a net push smaller than about the sleep speed per
+  frame (3 m/s² at the defaults) does not start a pile sliding, so a slope just past its friction angle
+  stays put.
 
 ## License
 
