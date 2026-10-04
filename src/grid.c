@@ -304,7 +304,7 @@ typedef struct { float reach2, shock; sl_vec3 up; int fill; } contact_ctx;
    chunk's offset, so the order never depends on threads. */
 static void contact_range(sl_world *w, int begin, int end, int chunk, void *ctx) {
     contact_ctx *c = ctx;
-    contact *out = w->contact_tmp + (c->fill ? w->chunk_buf[chunk] : 0);
+    contact *out = c->fill ? w->contact_tmp + w->chunk_buf[chunk] : NULL;   /* no buffer yet while counting */
     int count = 0;
     for (int i = begin; i < end; i++)
         for (int k = w->nbr_off[i]; k < w->nbr_off[i + 1]; k++) {
