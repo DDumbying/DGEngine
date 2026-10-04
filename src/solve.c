@@ -11,8 +11,10 @@ static void predict(sl_world *w, int begin, int end, int chunk, void *ctx) {
 }
 
 /* Position based fluids: lambda is how hard each fluid particle pushes to get back to rest density.
-   Neighbors inside the kernel are moved to the front of the list with their distance, and w->order[i]
-   marks where they end, so the delta pass only visits those. */
+   Neighbors inside the kernel and their distances are copied to the start of the particle's range in knbr and
+   kdist, and w->order[i]
+   marks where they end, so the delta pass only visits those. The neighbor list itself is never reordered,
+   so it depends only on where it was built, which snapshots rely on. */
 static void fluid_lambda(sl_world *w, int begin, int end, int chunk, void *ctx) {
     (void)chunk; (void)ctx;
     float h = w->h, h2 = h * h, inv_rest = 1.0f / w->w_rest, eps = 0.2f / (w->spacing * w->spacing);
@@ -30,8 +32,8 @@ static void fluid_lambda(sl_world *w, int begin, int end, int chunk, void *ctx) 
             float r2 = v3_len2(d);
             if (r2 >= h2) continue;
             float r = sqrtf(r2);
-            if (n != in) { w->nbr[n] = w->nbr[in]; w->nbr[in] = j; }
-            w->nbr_r[in++] = r;
+            w->kdist[in] = r;
+            w->knbr[in++] = j;
             rho += kernel(r, h);
             if (r < 1e-9f) continue;
             sl_vec3 g = v3_scale(d, kernel_grad(r, h) * inv_rest / r);
@@ -78,8 +80,8 @@ static void fluid_delta(sl_world *w, int begin, int end, int chunk, void *ctx) {
                 dp = v3_scale(wall, li * inv_rest);
             }
             for (int n = w->nbr_off[i]; n < w->order[i]; n++) {
-                int j = w->nbr[n];
-                float r = w->nbr_r[n];
+                int j = w->knbr[n];
+                float r = w->kdist[n];
                 if (r < 1e-9f || (!(w->flags[j] & F_FLUID) && li == 0)) continue;
                 sl_vec3 d = v3_sub(pi, w->p[j]);
                 float l = li + ((w->flags[j] & F_FLUID) ? live_lambda(w, j) : 0.0f);

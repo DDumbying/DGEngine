@@ -4,6 +4,7 @@
 #endif
 #include <math.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -1265,6 +1266,346 @@ static void test_version(void) {
     CHECK(SLIME_VERSION_MAJOR == 0 && SLIME_VERSION_MINOR == 6, "header still says %d.%d", SLIME_VERSION_MAJOR, SLIME_VERSION_MINOR);
 }
 
+/* ---------- snapshots and the state hash ---------- */
+
+typedef struct {
+    sl_material water, sand, solid;
+    sl_object rope, cloth, body;
+    sl_collider ball;
+    sl_particle grabbed;
+} busy_handles;
+
+/* Water, sand, a pinned rope, cloth, a soft body, a moving ball and a grab, plus a sand pile off to the side that
+   sleeps, so a snapshot holds every kind of state. */
+static sl_world *busy_world(int workers, busy_handles *h) {
+    sl_world_desc d = {0};
+    d.max_particles = 6000;
+    d.particle_radius = R;
+    d.gravity = (sl_vec3){0, -9.81f, 0};
+    d.workers = workers;
+    d.anisotropy = 1;
+    d.max_diffuse = 2000;
+    sl_world *w = sl_world_create(&d);
+    h->water = water(w);
+    h->sand = sand(w);
+    h->solid = solid(w);
+    add_floor(w, 0.6f);
+    sl_collider_add(w, &(sl_collider_desc){.shape = SL_BOX, .position = {0, 0.5f, 0}, .half_extents = {0.6f, 0.5f, 0.6f}, .inside = 1, .friction = 0.3f});
+    h->ball = sl_collider_add(w, &(sl_collider_desc){.shape = SL_SPHERE, .radius = 0.12f, .position = {-0.4f, 0.2f, 0}});
+    sl_spawn_box(w, h->water, (sl_vec3){-0.6f, 0, -0.6f}, (sl_vec3){0, 0.3f, 0.6f});
+    sl_spawn_box(w, h->sand, (sl_vec3){0.1f, 0, -0.3f}, (sl_vec3){0.4f, 0.3f, 0.3f});
+    sl_spawn_box(w, h->sand, (sl_vec3){2.0f, 0, 2.0f}, (sl_vec3){2.2f, 0.2f, 2.2f});
+    h->rope = sl_rope_create(w, h->solid, (sl_vec3){-0.5f, 0.9f, 0.3f}, (sl_vec3){0.5f, 0.9f, 0.3f}, 0);
+    const sl_particle *ids;
+    int n = sl_object_particles(w, h->rope, &ids);
+    sl_pin(w, ids[0], 1);
+    sl_pin(w, ids[n - 1], 1);
+    h->cloth = sl_cloth_create(w, h->solid, (sl_vec3){-0.3f, 0.7f, -0.4f}, (sl_vec3){0.4f, 0, 0}, (sl_vec3){0, 0, 0.3f}, 0, 0.01f);
+    h->body = sl_softbody_create_box(w, h->solid, (sl_vec3){0.15f, 0.5f, -0.1f}, (sl_vec3){0.35f, 0.7f, 0.1f}, 0.6f, 0.3f);
+    n = sl_object_particles(w, h->body, &ids);
+    h->grabbed = ids[n - 1];
+    sl_grab_begin(w, h->grabbed);
+    return w;
+}
+
+/* The same inputs every run: the ball sweeps, the grab drags, sand is poured and some removed. */
+static void busy_inputs(sl_world *w, const busy_handles *h, int frame) {
+    float t = (float)frame;
+    sl_collider_move(w, h->ball, (sl_vec3){-0.4f + 0.3f * sinf(t * 0.05f), 0.2f, 0.2f * cosf(t * 0.05f)}, NULL);
+    sl_grab_move(w, h->grabbed, (sl_vec3){0.3f, 0.7f + 0.004f * t, 0.1f * sinf(t * 0.1f)});
+    if (frame % 10 == 0) sl_spawn(w, h->sand, (sl_vec3){0.25f, 0.95f, 0.05f * (float)(frame % 3)}, (sl_vec3){0, -1, 0});
+    if (frame % 25 == 5) sl_remove_sphere(w, (sl_vec3){-0.5f, 0.05f, -0.5f}, 0.08f);
+    sl_step(w, DT);
+}
+
+static int same_world(const sl_world *a, const sl_world *b) {
+    return sl_count(a) == sl_count(b) && sl_state_hash(a) == sl_state_hash(b)
+        && memcmp(sl_positions(a), sl_positions(b), sizeof(sl_vec3) * (size_t)sl_count(a)) == 0
+        && memcmp(sl_velocities(a), sl_velocities(b), sizeof(sl_vec3) * (size_t)sl_count(a)) == 0
+        && memcmp(sl_ids(a), sl_ids(b), sizeof(sl_particle) * (size_t)sl_count(a)) == 0;
+}
+
+static void *take_snapshot(const sl_world *w, size_t *size) {
+    *size = sl_snapshot_size(w);
+    void *buf = malloc(*size);
+    size_t wrote = sl_snapshot_save(w, buf, *size);
+    CHECK(wrote == *size, "snapshot wrote %zu of %zu bytes", wrote, *size);
+    return buf;
+}
+
+/* Rollback: restore a snapshot and replay the same inputs, and the world ends bit for bit where it did before. */
+static void test_snapshot_rollback(void) {
+    busy_handles h;
+    sl_world *w = busy_world(1, &h);
+    for (int f = 0; f < 90; f++) busy_inputs(w, &h, f);
+    size_t size;
+    void *snap = take_snapshot(w, &size);
+    uint64_t at_save = sl_state_hash(w);
+    for (int f = 90; f < 150; f++) busy_inputs(w, &h, f);
+    uint64_t first = sl_state_hash(w);
+    int count = sl_count(w);
+    sl_vec3 *pos = malloc(sizeof(sl_vec3) * (size_t)count);
+    memcpy(pos, sl_positions(w), sizeof(sl_vec3) * (size_t)count);
+
+    CHECK(sl_snapshot_load(w, snap, size) == SL_SNAPSHOT_OK, "load failed");
+    CHECK(sl_state_hash(w) == at_save, "restored state hashes differently from the saved one");
+    for (int f = 90; f < 150; f++) busy_inputs(w, &h, f);
+    CHECK(sl_state_hash(w) == first && sl_count(w) == count
+          && memcmp(sl_positions(w), pos, sizeof(sl_vec3) * (size_t)count) == 0, "replay after a rollback diverged");
+    CHECK(sl_object_particles(w, h.rope, NULL) > 0 && sl_alive(w, h.grabbed) && sl_collider_enabled(w, h.ball),
+          "handles did not survive the restore");
+    free(pos);
+    free(snap);
+    sl_world_destroy(w);
+}
+
+/* A snapshot taken right after edits, before the next step, also replays exactly. */
+static void test_snapshot_between_edits(void) {
+    busy_handles h;
+    sl_world *a = busy_world(1, &h);
+    for (int f = 0; f < 40; f++) busy_inputs(a, &h, f);
+    sl_spawn_box(a, h.water, (sl_vec3){-0.2f, 0.6f, -0.2f}, (sl_vec3){0, 0.8f, 0});
+    sl_remove_sphere(a, (sl_vec3){0.25f, 0.1f, 0}, 0.1f);
+    size_t size;
+    void *snap = take_snapshot(a, &size);
+    for (int f = 40; f < 80; f++) busy_inputs(a, &h, f);
+    uint64_t first = sl_state_hash(a);
+    CHECK(sl_snapshot_load(a, snap, size) == SL_SNAPSHOT_OK, "load failed");
+    for (int f = 40; f < 80; f++) busy_inputs(a, &h, f);
+    CHECK(sl_state_hash(a) == first, "replay from a snapshot taken between edits diverged");
+    free(snap);
+    sl_world_destroy(a);
+}
+
+/* Late join: a snapshot loaded into a brand new world, with other workers and other buffer sizes, continues in step
+   with the world it came from. The far-apart sand pile also exercises the hash grid. */
+static void test_snapshot_late_join(void) {
+    busy_handles h;
+    sl_world *host = busy_world(1, &h);
+    for (int f = 0; f < 120; f++) busy_inputs(host, &h, f);
+    size_t size;
+    void *snap = take_snapshot(host, &size);
+
+    sl_world_desc d = {0};
+    d.max_particles = 6000;
+    d.particle_radius = R;
+    d.workers = 4;
+    d.anisotropy = 1;
+    sl_world *guest = sl_world_create(&d);
+    CHECK(sl_snapshot_load(guest, snap, size) == SL_SNAPSHOT_OK, "late join load failed");
+    CHECK(same_world(host, guest), "joined world differs right after the load");
+    for (int f = 120; f < 200; f++) { busy_inputs(host, &h, f); busy_inputs(guest, &h, f); }
+    CHECK(same_world(host, guest), "joined world drifted from the host");
+    free(snap);
+    sl_world_destroy(host);
+    sl_world_destroy(guest);
+}
+
+/* Calm water that stays awake keeps its neighbor lists across many steps, so a restore must rebuild exactly the
+   lists the saving world was using, not just lists that are good enough. */
+static void test_snapshot_calm_water(void) {
+    sl_world_desc d = {0};
+    d.max_particles = 4000;
+    d.particle_radius = R;
+    d.gravity = (sl_vec3){0, -9.81f, 0};
+    d.sleep_speed = -1;
+    sl_world *w = sl_world_create(&d);
+    add_container(w, (sl_vec3){0.5f, 1.0f, 0.5f});
+    sl_spawn_box(w, sl_material_add(w, &(sl_material_desc){.kind = SL_FLUID, .density = 1000, .viscosity = 0.1f, .vorticity = 0.1f, .cohesion = 0.2f}),
+                 (sl_vec3){-0.5f, -1.0f, -0.5f}, (sl_vec3){0.5f, -0.6f, 0.5f});
+    steps(w, 300);
+    sl_stats st0, st1;
+    sl_get_stats(w, &st0);
+    size_t size;
+    void *snap = take_snapshot(w, &size);
+    steps(w, 60);
+    sl_get_stats(w, &st1);
+    CHECK(st1.rebuilds - st0.rebuilds < 30, "water rebuilt %d times in 60 steps, test does not apply", st1.rebuilds - st0.rebuilds);
+    uint64_t first = sl_state_hash(w);
+    CHECK(sl_snapshot_load(w, snap, size) == SL_SNAPSHOT_OK, "load failed");
+    steps(w, 60);
+    CHECK(sl_state_hash(w) == first, "calm water diverged after a restore");
+    free(snap);
+    sl_world_destroy(w);
+}
+
+/* A spread-out world uses the hash grid; a host that once held many more particles has bigger buffers than a
+   fresh guest, and that must not change where particles hash. */
+static void test_snapshot_spread_join(void) {
+    sl_world_desc d = {0};
+    d.max_particles = 20000;
+    d.particle_radius = R;
+    d.gravity = (sl_vec3){0, -9.81f, 0};
+    d.sleep_speed = -1;
+    sl_world *host = sl_world_create(&d);
+    sl_material m = water(host);
+    add_floor(host, 0.5f);
+    sl_spawn_box(host, m, (sl_vec3){-1, 0, -1}, (sl_vec3){1, 2, 1});           /* 8000, grows the buffers */
+    sl_remove_sphere(host, (sl_vec3){0, 1, 0}, 3);                             /* and empties them again */
+    for (int c = 0; c < 2; c++) sl_spawn_box(host, m, (sl_vec3){80.0f * c, 0, 0}, (sl_vec3){80.0f * c + 0.6f, 0.4f, 0.6f});
+    steps(host, 30);
+    size_t size;
+    void *snap = take_snapshot(host, &size);
+    /* The guest played a bigger round before, so its buffers are larger than the host's. */
+    sl_world *guest = sl_world_create(&d);
+    sl_spawn_box(guest, water(guest), (sl_vec3){-1, 0, -1}, (sl_vec3){2, 2, 1});
+    CHECK(sl_count(guest) > 8192, "guest too small, test does not apply");
+    CHECK(sl_snapshot_load(guest, snap, size) == SL_SNAPSHOT_OK, "load failed");
+    steps(host, 60);
+    steps(guest, 60);
+    CHECK(same_world(host, guest), "spread-out world drifted after joining");
+    free(snap);
+    sl_world_destroy(host);
+    sl_world_destroy(guest);
+}
+
+/* The body hash, as the snapshot format defines it (see src/snapshot.c), so the test can make damaged bodies that
+   pass the checksum and reach validation. */
+static uint64_t body_hash(const unsigned char *p, size_t n) {
+    uint64_t h = 0, acc = 0;
+    int fill = 0;
+    for (size_t k = 0; k < n; k++) {
+        acc |= (uint64_t)p[k] << (8 * fill);
+        if (++fill == 8) { h ^= acc; h *= 0x9e3779b97f4a7c15ull; h ^= h >> 29; acc = 0; fill = 0; }
+    }
+    h ^= acc ^ ((uint64_t)n << 56); h *= 0x9e3779b97f4a7c15ull; h ^= h >> 29;
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdull; h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ull; h ^= h >> 33;
+    return h;
+}
+
+/* Snapshots for late joiners come over the network: damaged bodies that still carry a valid checksum are refused
+   or load into a world that steps safely; nothing reads or writes out of bounds (run under AddressSanitizer). */
+static void test_snapshot_hostile(void) {
+    busy_handles h;
+    sl_world *src = busy_world(1, &h);
+    for (int f = 0; f < 20; f++) busy_inputs(src, &h, f);
+    size_t size;
+    unsigned char *snap = take_snapshot(src, &size), *bad = malloc(size);
+    sl_world_desc d = {0};
+    d.max_particles = 6000;
+    d.particle_radius = R;
+    d.anisotropy = 1;
+    sl_world *w = sl_world_create(&d);
+    unsigned seed = 99;
+    int refused = 0, loaded = 0;
+    for (int round = 0; round < 300; round++) {
+        memcpy(bad, snap, size);
+        for (int k = 0; k < 1 + round % 4; k++) {
+            seed = seed * 1664525u + 1013904223u;
+            size_t at = 56 + (seed >> 8) % (size - 56);
+            seed = seed * 1664525u + 1013904223u;
+            bad[at] = round % 3 == 0 ? (unsigned char)(seed >> 24) : (unsigned char)(bad[at] ^ (1u << (seed >> 29)));
+        }
+        uint64_t sum = body_hash(bad + 56, size - 56);
+        for (int k = 0; k < 8; k++) bad[48 + k] = (unsigned char)(sum >> (8 * k));
+        sl_snapshot_result r = sl_snapshot_load(w, bad, size);
+        if (r == SL_SNAPSHOT_OK) { loaded++; for (int s = 0; s < 3; s++) sl_step(w, DT); }
+        else refused += r == SL_SNAPSHOT_CORRUPT;
+    }
+    CHECK(refused > 100, "only %d of 300 damaged snapshots were refused", refused);
+    CHECK(all_finite(w), "a damaged snapshot left non-finite positions");
+    CHECK(sl_snapshot_load(w, snap, size) == SL_SNAPSHOT_OK, "the intact snapshot no longer loads (%d loaded damaged)", loaded);
+    free(bad);
+    free(snap);
+    sl_world_destroy(w);
+    sl_world_destroy(src);
+}
+
+/* Bad snapshots are refused with the right reason, and the world they were offered to is untouched. */
+static void test_snapshot_errors(void) {
+    busy_handles h;
+    sl_world *w = busy_world(1, &h);
+    for (int f = 0; f < 30; f++) busy_inputs(w, &h, f);
+    size_t size;
+    unsigned char *snap = take_snapshot(w, &size);
+    CHECK(sl_snapshot_save(w, snap, size - 1) == 0, "save into a short buffer did not fail");
+    for (int f = 30; f < 40; f++) busy_inputs(w, &h, f);
+    uint64_t before = sl_state_hash(w);
+
+    CHECK(sl_snapshot_load(w, snap, size - 1) == SL_SNAPSHOT_TRUNCATED, "truncated snapshot not reported");
+    CHECK(sl_snapshot_load(w, snap, 10) == SL_SNAPSHOT_TRUNCATED, "tiny buffer not reported");
+    unsigned char *bad = malloc(size);
+    memcpy(bad, snap, size);
+    bad[size - 7] ^= 0x10;
+    CHECK(sl_snapshot_load(w, bad, size) == SL_SNAPSHOT_CORRUPT, "flipped bit not reported");
+    memcpy(bad, snap, size);
+    bad[0] = 'X';
+    CHECK(sl_snapshot_load(w, bad, size) == SL_SNAPSHOT_CORRUPT, "bad magic not reported");
+    memcpy(bad, snap, size);
+    bad[8] ^= 1;   /* version field */
+    CHECK(sl_snapshot_load(w, bad, size) == SL_SNAPSHOT_VERSION, "wrong version not reported");
+    CHECK(sl_state_hash(w) == before, "failed loads changed the world");
+
+    sl_world_desc d = {0};
+    d.max_particles = 6000;
+    d.particle_radius = 2 * R;
+    sl_world *other = sl_world_create(&d);
+    CHECK(sl_snapshot_load(other, snap, size) == SL_SNAPSHOT_SETTINGS, "different radius not reported");
+    CHECK(sl_count(other) == 0, "a refused snapshot left particles behind");
+    sl_world_destroy(other);
+    free(bad);
+    free(snap);
+    sl_world_destroy(w);
+}
+
+/* The hash tells identical worlds apart from ones that differ by a single bit of one velocity. */
+static void test_state_hash(void) {
+    busy_handles ha, hb;
+    sl_world *a = busy_world(1, &ha), *b = busy_world(3, &hb);
+    for (int f = 0; f < 30; f++) { busy_inputs(a, &ha, f); busy_inputs(b, &hb, f); }
+    CHECK(sl_state_hash(a) == sl_state_hash(b), "identical worlds hash differently");
+    sl_particle p = sl_ids(b)[sl_count(b) / 2];
+    sl_vec3 v = sl_velocity(b, p);
+    unsigned bits;
+    memcpy(&bits, &v.x, 4);
+    bits ^= 1;
+    memcpy(&v.x, &bits, 4);
+    sl_set_velocity(b, p, v);
+    CHECK(sl_state_hash(a) != sl_state_hash(b), "a one-bit change did not change the hash");
+    sl_world_destroy(a);
+    sl_world_destroy(b);
+}
+
+/* Snapshots stay small: loose resting particles cost well under the in-memory size. */
+static void test_snapshot_size(void) {
+    sl_world *w = sleeping_pile(4000);
+    sl_stats st;
+    sl_get_stats(w, &st);
+    double per = (double)sl_snapshot_size(w) / (double)sl_count(w);
+    CHECK(per < 72, "snapshot takes %.0f bytes per particle", per);
+    sl_world_destroy(w);
+}
+
+/* Surface ellipsoids are not saved; they are rebuilt on load, also for water that sleeps. */
+static void test_snapshot_ellipsoids(void) {
+    sl_world_desc d = {0};
+    d.max_particles = 4000;
+    d.particle_radius = R;
+    d.gravity = (sl_vec3){0, -9.81f, 0};
+    d.anisotropy = 1;
+    sl_world *w = sl_world_create(&d);
+    add_container(w, (sl_vec3){0.4f, 1.0f, 0.4f});
+    sl_spawn_box(w, water(w), (sl_vec3){-0.4f, -1.0f, -0.4f}, (sl_vec3){0.4f, -0.7f, 0.4f});
+    sl_stats st;
+    for (int i = 0; i < 600; i++) { sl_step(w, DT); sl_get_stats(w, &st); if (!st.awake) break; }
+    CHECK(st.awake == 0, "pool never slept, test does not apply");
+    int n = sl_count(w);
+    sl_vec3 *before = malloc(sizeof(sl_vec3) * 4 * (size_t)n);
+    memcpy(before, sl_anisotropy(w), sizeof(sl_vec3) * 4 * (size_t)n);
+    size_t size;
+    void *snap = take_snapshot(w, &size);
+    sl_world *fresh = sl_world_create(&d);
+    CHECK(sl_snapshot_load(fresh, snap, size) == SL_SNAPSHOT_OK, "load failed");
+    const sl_vec3 *after = sl_anisotropy(fresh);
+    float worst = 0;
+    for (int k = 0; k < 4 * n; k++) worst = fmaxf(worst, dist(before[k], after[k]));
+    CHECK(worst < 0.2f * R, "rebuilt ellipsoids differ by %f", worst);
+    free(before);
+    free(snap);
+    sl_world_destroy(w);
+    sl_world_destroy(fresh);
+}
+
 typedef struct { const char *name; void (*fn)(void); } test;
 
 int main(int argc, char **argv) {
@@ -1319,6 +1660,16 @@ int main(int argc, char **argv) {
         {"memory stats", test_memory_stats},
         {"object churn", test_object_churn},
         {"version", test_version},
+        {"snapshot rollback", test_snapshot_rollback},
+        {"snapshot between edits", test_snapshot_between_edits},
+        {"snapshot late join", test_snapshot_late_join},
+        {"snapshot calm water", test_snapshot_calm_water},
+        {"snapshot spread join", test_snapshot_spread_join},
+        {"snapshot errors", test_snapshot_errors},
+        {"snapshot hostile", test_snapshot_hostile},
+        {"state hash", test_state_hash},
+        {"snapshot size", test_snapshot_size},
+        {"snapshot ellipsoids", test_snapshot_ellipsoids},
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
         {"idle workers block", test_idle_workers_block},
 #endif

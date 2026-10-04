@@ -124,7 +124,12 @@ static int setup_grid(sl_world *w) {
         g->nx = (int)n[0]; g->ny = (int)n[1]; g->nz = (int)n[2];
         g->cells = g->nx * g->ny * g->nz;
     } else {
-        g->cells = g->table_size;
+        /* Sized from the particle count, never from buffer capacities, which differ between machines that
+           reached the same state by different routes; bucket order shapes neighbor order and so results. */
+        int table = 1024;
+        while (table < (1 << 30) && table < 2LL * w->count) table <<= 1;
+        g->table_size = table;
+        g->cells = table;
     }
     return sl__grow(w, (void **)&g->start, &g->start_cap, g->cells + 1, sizeof(int));
 }
@@ -188,14 +193,22 @@ static void reorder(sl_world *w) {
     for (int k = 0; k < n; k++) g->sorted[k] = k;
 }
 
-/* Every particle within range of slot s, from the cells around it, written to out up to room.
-   Positions are read from xs, a copy in cell order, so each row of cells is one sequential run.
-   Returns the full count either way. */
-static int scan_cells(const sl_world *w, const sl_vec3 *xs, int s, int *out, int room, float range2) {
+#define SL_FAR_MAX 256
+
+/* Every particle within range of slot s, from the cells around it, written to out up to room; returns the full
+   count either way. Positions are read from xs, a copy in cell order, so each row of cells is one sequential
+   run. With far set, neighbors closer than near2 come first and the rest are collected in far and appended,
+   so passes that skip far neighbors branch predictably; it returns -1 if far fills up. */
+static int scan_cells_split(const sl_world *w, const sl_vec3 *xs, int s, int *out, int room, float range2, float near2, int *far) {
     const grid *g = &w->g;
     sl_vec3 x = w->x[s];
-    int n = 0;
-#define TRY(t) do { if (v3_len2(v3_sub(xs[t], x)) < range2) { int c_ = g->sorted[t]; if (c_ != s) { if (n < room) out[n] = c_; n++; } } } while (0)
+    int n = 0, nf = 0;
+#define TRY(t) do { float d2_ = v3_len2(v3_sub(xs[t], x)); \
+        if (d2_ < range2) { int c_ = g->sorted[t]; \
+            if (c_ != s) { \
+                if (!far || d2_ < near2) { if (n < room) out[n] = c_; n++; } \
+                else if (nf < SL_FAR_MAX) far[nf++] = c_; \
+                else return -1; } } } while (0)
     if (g->dense) {
         int ix = dense_coord(x.x, g->origin.x, g->cell, g->nx), iy = dense_coord(x.y, g->origin.y, g->cell, g->ny);
         int iz = dense_coord(x.z, g->origin.z, g->cell, g->nz);
@@ -206,13 +219,22 @@ static int scan_cells(const sl_world *w, const sl_vec3 *xs, int s, int *out, int
                 int row = g->nx * (y + g->ny * z);
                 for (int t = g->start[row + x0]; t < g->start[row + x1 + 1]; t++) TRY(t);
             }
-        return n;
+    } else {
+        int buckets[27], nb = hash_buckets(g, x, buckets);
+        for (int b = 0; b < nb; b++)
+            for (int t = g->start[buckets[b]]; t < g->start[buckets[b] + 1]; t++) TRY(t);
     }
-    int buckets[27], nb = hash_buckets(g, x, buckets);
-    for (int b = 0; b < nb; b++)
-        for (int t = g->start[buckets[b]]; t < g->start[buckets[b] + 1]; t++) TRY(t);
 #undef TRY
+    for (int k = 0; k < nf; k++) { if (n < room) out[n] = far[k]; n++; }
     return n;
+}
+
+/* Near neighbors first, or in plain scan order for the rare particle with more far neighbors than fit. Either
+   way the list depends only on the positions it was built from. */
+static int scan_cells(const sl_world *w, const sl_vec3 *xs, int s, int *out, int room, float range2) {
+    int far[SL_FAR_MAX];
+    int n = scan_cells_split(w, xs, s, out, room, range2, w->h * w->h, far);
+    return n >= 0 ? n : scan_cells_split(w, xs, s, out, room, range2, 0, NULL);
 }
 
 static void copy_sorted(sl_world *w, int begin, int end, int chunk, void *ctx) {
@@ -225,7 +247,7 @@ typedef struct { float range2; int room; } list_ctx;
 /* Each chunk of slots writes its lists into its own slice of the scratch buffer and keeps the counts. */
 static void find_lists(sl_world *w, int begin, int end, int chunk, void *ctx) {
     list_ctx *c = ctx;
-    int *out = (int *)(void *)w->nbr_r + (size_t)chunk * (size_t)c->room, n = 0;
+    int *out = w->knbr + (size_t)chunk * (size_t)c->room, n = 0;
     for (int s = begin; s < end; s++) {
         int k = scan_cells(w, w->tmp, s, out + (n < c->room ? n : c->room), c->room - n, c->range2);
         w->order[s] = k;
@@ -236,7 +258,7 @@ static void find_lists(sl_world *w, int begin, int end, int chunk, void *ctx) {
 
 /* Copies each chunk's slice to its final place and fills the offsets. */
 static void place_lists(sl_world *w, int begin, int end, int chunk, void *ctx) {
-    const int *slice = (const int *)(void *)w->nbr_r + (size_t)chunk * (size_t)*(int *)ctx;
+    const int *slice = w->knbr + (size_t)chunk * (size_t)*(int *)ctx;
     int at = w->chunk_buf[chunk], count = w->chunk_buf[chunk + 1] - at;
     if (count) memcpy(w->nbr + at, slice, (size_t)count * sizeof(int));
     for (int s = begin; s < end; s++) { w->nbr_off[s] = at; at += w->order[s]; }
@@ -249,7 +271,7 @@ static int build_lists(sl_world *w, float range2) {
     if (!sl__grow(w, (void **)&w->chunk_buf, &w->chunk_cap, chunks + 1, sizeof(int))) return 0;
     sl__parallel(w, n, copy_sorted, NULL);
     for (;;) {
-        if (!sl__grow(w, (void **)&w->nbr_r, &w->nbr_r_cap, chunks * w->chunk_room, sizeof(float))) return 0;
+        if (!sl__grow(w, (void **)&w->knbr, &w->knbr_cap, chunks * w->chunk_room, sizeof(int))) return 0;
         list_ctx lc = {range2, w->chunk_room};
         sl__parallel(w, n, find_lists, &lc);
         int most = 0;
@@ -260,7 +282,8 @@ static int build_lists(sl_world *w, float range2) {
     int total = 0;
     for (int c = 0; c < chunks; c++) { int k = w->chunk_buf[c]; w->chunk_buf[c] = total; total += k; }
     w->chunk_buf[chunks] = total;
-    if (!sl__grow(w, (void **)&w->nbr, &w->nbr_cap, total, sizeof(int))) return 0;
+    if (!sl__grow(w, (void **)&w->nbr, &w->nbr_cap, total, sizeof(int))
+        || !sl__grow(w, (void **)&w->kdist, &w->kdist_cap, total, sizeof(float))) return 0;
     sl__parallel(w, n, place_lists, &w->chunk_room);
     w->nbr_off[n] = total;
     w->pair_count = total / 2;

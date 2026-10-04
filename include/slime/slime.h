@@ -2,6 +2,7 @@
 #define SLIME_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -171,6 +172,27 @@ typedef enum { SL_SPRAY, SL_FOAM, SL_BUBBLE } sl_diffuse_kind;
 /* Spray, foam and bubbles thrown off by fast water; any output pointer may be NULL. */
 SL_API int sl_diffuse(const sl_world *w, const sl_vec3 **positions, const sl_vec3 **velocities, const unsigned char **kinds,
                const float **life);
+
+/* Snapshots are plain bytes in a fixed little-endian layout: load them on any platform, with the same slime
+   version and a world created with the same particle radius, max_particles, substeps, iterations, fluid
+   iterations, sleep speed and anisotropy setting. They hold the gameplay state: particles, objects,
+   materials, colliders, gravity and grabs. Spray is cleared and surface ellipsoids are rebuilt on load.
+   Handles stay valid across a save and load. Determinism assumes allocations succeed. */
+SL_API size_t sl_snapshot_size(const sl_world *w);
+/* Returns the bytes written, or 0 when cap is smaller than sl_snapshot_size. */
+SL_API size_t sl_snapshot_save(const sl_world *w, void *buf, size_t cap);
+typedef enum {
+    SL_SNAPSHOT_OK,
+    SL_SNAPSHOT_TRUNCATED,   /* shorter than the snapshot it starts */
+    SL_SNAPSHOT_CORRUPT,     /* not a snapshot, or damaged */
+    SL_SNAPSHOT_VERSION,     /* saved by another slime version */
+    SL_SNAPSHOT_SETTINGS,    /* saved by a world created with other settings */
+    SL_SNAPSHOT_NO_MEMORY
+} sl_snapshot_result;
+/* Replaces the whole world state; on failure the world is left exactly as it was. */
+SL_API sl_snapshot_result sl_snapshot_load(sl_world *w, const void *buf, size_t size);
+/* Hash of exactly what a snapshot holds, to compare across machines each frame and catch desyncs. */
+SL_API uint64_t sl_state_hash(const sl_world *w);
 
 SL_API float sl_particle_radius(const sl_world *w);
 SL_API void sl_get_stats(const sl_world *w, sl_stats *out);

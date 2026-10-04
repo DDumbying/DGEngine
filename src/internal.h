@@ -92,8 +92,9 @@ struct sl_world {
     int collider_count;
 
     grid g;
-    int *nbr_off, *nbr, nbr_cap, nbr_r_cap;
-    float *nbr_r;                       /* distance per neighbor entry, from the lambda pass */
+    int *nbr_off, *nbr, nbr_cap, knbr_cap, kdist_cap;
+    int *knbr;                          /* per neighbor entry: in-kernel neighbors from the lambda pass; list scratch */
+    float *kdist;                       /* their distances */
     int pair_count;           /* close pairs, each counted once */
     int chunk_room;           /* list entries each chunk may write in one pass */
     contact *contacts, *contact_tmp;
@@ -150,6 +151,7 @@ double sl__now(void);
 void *sl__alloc(sl_world *w, size_t size);
 void sl__free(sl_world *w, void *ptr);
 int sl__grow(sl_world *w, void **ptr, int *cap, int need, size_t elem);
+int sl__grow_slots(sl_world *w, int need);   /* every per-slot array, up to max_particles */
 
 /* threads: fn runs over [begin, end) of count items, chunk is a fixed index for reductions */
 typedef void (*sl_range_fn)(sl_world *w, int begin, int end, int chunk, void *ctx);

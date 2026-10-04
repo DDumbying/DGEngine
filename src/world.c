@@ -57,7 +57,7 @@ static int slot_arrays(sl_world *w, slot_array *out) {
     return n;
 }
 
-static int grow_slots(sl_world *w, int need) {
+int sl__grow_slots(sl_world *w, int need) {
     if (need <= w->cap) return 1;
     if (need > w->max_particles) return 0;
     long long grown = w->cap > 0 ? w->cap : 1024;   /* wide, so doubling past 2^30 cannot overflow */
@@ -78,9 +78,6 @@ static int grow_slots(sl_world *w, int need) {
         *arrays[i].ptr = mem;
     }
 
-    int table = 1024;
-    while (table < (1 << 30) && table < 2LL * n) table <<= 1;
-    w->g.table_size = table;
     w->cap = n;
     return 1;
 }
@@ -123,7 +120,7 @@ sl_world *sl_world_create(const sl_world_desc *desc) {
         if (!w->dpos || !w->dvel || !w->dlife || !w->dkind) { sl_world_destroy(w); return NULL; }
     }
 
-    if (!grow_slots(w, desc->max_particles < 1024 ? desc->max_particles : 1024)) { sl_world_destroy(w); return NULL; }
+    if (!sl__grow_slots(w, desc->max_particles < 1024 ? desc->max_particles : 1024)) { sl_world_destroy(w); return NULL; }
     if (!w->tasks.parallel_for && desc->workers > 1) {
         w->pool = sl__pool_create(w, desc->workers - 1);
         if (!w->pool) { sl_world_destroy(w); return NULL; }
@@ -139,7 +136,8 @@ void sl_world_destroy(sl_world *w) {
     for (int i = 0; i < count; i++) sl__free(w, *arrays[i].ptr);
     sl__free(w, w->g.start);
     sl__free(w, w->nbr);
-    sl__free(w, w->nbr_r);
+    sl__free(w, w->knbr);
+    sl__free(w, w->kdist);
     sl__free(w, w->contacts);
     sl__free(w, w->contact_tmp);
     sl__free(w, w->island_calm);
@@ -190,7 +188,7 @@ static sl_particle reissue(const sl_world *w, sl_particle old) {
 
 sl_particle sl_spawn(sl_world *w, sl_material m, sl_vec3 pos, sl_vec3 vel) {
     if (!w || m < 0 || m >= w->material_count || !v3_finite(pos) || !v3_finite(vel)) return -1;
-    if (w->count >= w->max_particles || !grow_slots(w, w->count + 1)) return -1;
+    if (w->count >= w->max_particles || !sl__grow_slots(w, w->count + 1)) return -1;
     int s = w->count++;
     int id = w->free_count > 0 ? reissue(w, w->free_ids[--w->free_count]) : w->next_id++;
     float d = w->spacing;
@@ -703,7 +701,7 @@ void sl_get_stats(const sl_world *w, sl_stats *out) {
     int count = slot_arrays((sl_world *)w, arrays);   /* only reads the table, nothing is written */
     size_t bytes = sizeof *w;
     for (int i = 0; i < count; i++) bytes += ((size_t)w->cap + (size_t)arrays[i].extra) * arrays[i].elem;
-    bytes += (size_t)w->g.start_cap * sizeof(int) + (size_t)w->nbr_cap * sizeof(int) + (size_t)w->nbr_r_cap * sizeof(float)
+    bytes += (size_t)w->g.start_cap * sizeof(int) + (size_t)w->nbr_cap * sizeof(int) + (size_t)w->knbr_cap * sizeof(int) + (size_t)w->kdist_cap * sizeof(float)
         + (size_t)(w->contact_cap + w->contact_tmp_cap) * sizeof(contact) + (size_t)w->island_cap * sizeof(int)
         + (size_t)w->mem_list_cap * sizeof(int) + (size_t)(w->dist_cap + w->dist_tmp_cap) * sizeof(dist_con)
         + (size_t)w->dist_lambda_cap * sizeof(float) + (size_t)w->member_cap * sizeof(member)

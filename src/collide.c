@@ -76,7 +76,7 @@ void sl__wall_table_init(sl_world *w) {
 
 static float wall_sample(const sl_world *w, float z, float *slope) {
     float f = z / w->h * SL_WALL_SAMPLES;
-    if (f >= SL_WALL_SAMPLES) { *slope = 0; return 0; }
+    if (!(f < SL_WALL_SAMPLES)) { *slope = 0; return 0; }   /* also NaN */
     if (f < 0) f = 0;
     int k = (int)f;
     float a = w->wall_table[k], b = w->wall_table[k + 1];

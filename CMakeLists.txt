@@ -26,7 +26,7 @@ if(NOT header_version VERSION_EQUAL PROJECT_VERSION)
 endif()
 
 # STATIC or SHARED follows BUILD_SHARED_LIBS.
-add_library(slime src/world.c src/grid.c src/solve.c src/collide.c src/objects.c src/threads.c src/extras.c)
+add_library(slime src/world.c src/grid.c src/solve.c src/collide.c src/objects.c src/threads.c src/extras.c src/snapshot.c)
 add_library(slime::slime ALIAS slime)
 find_package(Threads REQUIRED)
 target_link_libraries(slime PRIVATE Threads::Threads)
