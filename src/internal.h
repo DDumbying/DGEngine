@@ -45,7 +45,12 @@ typedef struct {
     sl_particle *ids;
     int count;
     float self_dist;
+    int gen;   /* bumped each time the slot is reused, so old handles stay dead */
 } object;
+
+/* An sl_object is the slot in its low OBJ_BITS and the slot's generation above them. */
+#define OBJ_BITS 20
+#define OBJ_GENS (1 << (31 - OBJ_BITS))
 
 enum { OBJ_ROPE = 1, OBJ_CLOTH, OBJ_SOFT };
 
@@ -130,7 +135,7 @@ struct sl_world {
 };
 
 /* Phase timers, only in builds made with SLIME_PROFILE; one world at a time. */
-enum { P_SORT, P_REORDER, P_PAIRS, P_NEIGHBORS, P_CONTACTS, P_COLOR, P_ISLANDS, P_SKIN, P_STABILIZE, P_PREDICT,
+enum { P_SORT, P_REORDER, P_PAIRS, P_CONTACTS, P_COLOR, P_ISLANDS, P_SKIN, P_STABILIZE, P_PREDICT,
        P_LAMBDA, P_DELTA, P_APPLY, P_SOLIDS, P_OBJECTS, P_COLLIDERS, P_VELOCITY, P_FLUID_STEP, P_EXTRAS, P_STEP, P_COUNT };
 #ifdef SLIME_PROFILE
 extern double sl__prof[P_COUNT];
@@ -158,6 +163,12 @@ void sl__pool_run(sl_pool *p, sl_task_fn *task, int count, void *ctx);
 
 static inline float kernel(float r, float h) { return r < h ? (h - r) * (h - r) * (h - r) : 0.0f; }
 static inline float kernel_grad(float r, float h) { return r < h ? -3.0f * (h - r) * (h - r) : 0.0f; }
+
+/* Inverse mass as the solver sees it this step: a particle that sleeps does not move until it wakes, which only
+   happens at the start of a step, so neighbor lists rebuilt mid-step can pair it with awake ones. */
+static inline float live_inv_mass(const sl_world *w, int i) { return (w->flags[i] & F_AWAKE) ? w->inv_mass[i] : 0.0f; }
+/* lambda of a sleeping particle is stale (reorder reuses the array as scratch), so it reads as zero. */
+static inline float live_lambda(const sl_world *w, int i) { return (w->flags[i] & F_AWAKE) ? w->lambda[i] : 0.0f; }
 
 static inline int id_index(const sl_world *w, sl_particle p) { return (int)((unsigned)p & ((1u << w->id_bits) - 1u)); }
 int sl__slot_of(const sl_world *w, sl_particle p);

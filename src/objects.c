@@ -1,13 +1,33 @@
 #include <string.h>
 #include "internal.h"
 
+/* A free slot from a destroyed object if there is one, so the table only grows to the most objects alive at once. */
 static int new_object(sl_world *w, int kind) {
-    if (!sl__grow(w, (void **)&w->objects, &w->object_cap, w->object_count + 1, sizeof(object))) return -1;
-    object *o = &w->objects[w->object_count];
-    memset(o, 0, sizeof *o);
+    int slot = 0;
+    while (slot < w->object_count && w->objects[slot].alive) slot++;
+    if (slot == w->object_count) {
+        if (slot >= 1 << OBJ_BITS || !sl__grow(w, (void **)&w->objects, &w->object_cap, slot + 1, sizeof(object))) return -1;
+        memset(&w->objects[slot], 0, sizeof(object));
+        w->object_count++;
+    } else {
+        w->objects[slot].gen = (w->objects[slot].gen + 1) % OBJ_GENS;
+    }
+    object *o = &w->objects[slot];
     o->alive = 1;
     o->kind = kind;
-    return w->object_count++;
+    return slot;
+}
+
+/* The slot of a live handle, or -1. */
+static int object_slot(const sl_world *w, sl_object o) {
+    if (!w || o < 0) return -1;
+    int slot = o & ((1 << OBJ_BITS) - 1);
+    return slot < w->object_count && w->objects[slot].alive && w->objects[slot].gen == o >> OBJ_BITS ? slot : -1;
+}
+
+static void destroy_slot(sl_world *w, int slot) {
+    w->objects[slot].alive = 2;
+    sl__remove_doomed(w, NULL, 0);
 }
 
 static int spawn_into(sl_world *w, int obj, sl_material m, sl_vec3 pos) {
@@ -49,11 +69,11 @@ static int alloc_ids(sl_world *w, int obj, int n) {
 }
 
 static sl_object finish(sl_world *w, int obj, int ok) {
-    if (!ok) { sl_object_destroy(w, obj); return -1; }
+    if (!ok) { destroy_slot(w, obj); return -1; }
     sl__color_dist(w);
     w->mem_dirty = 1;
     w->need_rebuild = 1;
-    return obj;
+    return obj | w->objects[obj].gen << OBJ_BITS;
 }
 
 static int valid_material(const sl_world *w, sl_material m) { return w && m >= 0 && m < w->material_count; }
@@ -167,9 +187,8 @@ sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec
 }
 
 void sl_object_destroy(sl_world *w, sl_object o) {
-    if (!w || o < 0 || o >= w->object_count || w->objects[o].alive != 1) return;
-    w->objects[o].alive = 2;
-    sl__remove_doomed(w, NULL, 0);
+    int slot = object_slot(w, o);
+    if (slot >= 0 && w->objects[slot].alive == 1) destroy_slot(w, slot);
 }
 
 /* Drops the object's constraints and record; its particles are removed by the caller. */
@@ -190,20 +209,22 @@ void sl__objects_drop(sl_world *w, int o) {
     w->cluster_count = nc;
     w->member_count = nm;
     sl__free(w, w->objects[o].ids);
+    int gen = w->objects[o].gen;
     memset(&w->objects[o], 0, sizeof(object));
+    w->objects[o].gen = gen;
     w->mem_dirty = 1;
 }
 
 int sl_object_particles(const sl_world *w, sl_object o, const sl_particle **ids) {
-    if (!w || o < 0 || o >= w->object_count || !w->objects[o].alive) { if (ids) *ids = NULL; return 0; }
-    if (ids) *ids = w->objects[o].ids;
-    return w->objects[o].count;
+    int slot = object_slot(w, o);
+    if (ids) *ids = slot >= 0 ? w->objects[slot].ids : NULL;
+    return slot >= 0 ? w->objects[slot].count : 0;
 }
 
 void sl_object_grid(const sl_world *w, sl_object o, int *nu, int *nv) {
-    int ok = w && o >= 0 && o < w->object_count && w->objects[o].alive;
-    if (nu) *nu = ok ? w->objects[o].nu : 0;
-    if (nv) *nv = ok ? w->objects[o].nv : 0;
+    int slot = object_slot(w, o);
+    if (nu) *nu = slot >= 0 ? w->objects[slot].nu : 0;
+    if (nv) *nv = slot >= 0 ? w->objects[slot].nv : 0;
 }
 
 void sl__objects_remap(sl_world *w, const int *old_to_new) {
@@ -238,13 +259,12 @@ static void solve_dist_range(sl_world *w, int begin, int end, int chunk, void *c
     for (int k = base + begin; k < base + end; k++) {
         const dist_con *c = &w->dist[k];
         int a = c->a, b = c->b;
-        if (!(w->flags[a] & F_AWAKE)) continue;
-        float wa = w->inv_mass[a], wb = w->inv_mass[b];
+        float wa = live_inv_mass(w, a), wb = live_inv_mass(w, b);
+        if (wa + wb <= 0) continue;
         sl_vec3 d = v3_sub(w->p[a], w->p[b]);
         float len = v3_len(d);
         if (len < 1e-9f) continue;
         float alpha = c->compliance * inv_h2, denom = wa + wb + alpha;
-        if (denom <= 0) continue;
         float dl = (-(len - c->rest) - alpha * w->dist_lambda[k]) / denom;
         w->dist_lambda[k] += dl;
         sl_vec3 n = v3_scale(d, 1.0f / len);

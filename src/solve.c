@@ -65,9 +65,10 @@ static void fluid_delta(sl_world *w, int begin, int end, int chunk, void *ctx) {
                 sl_vec3 d = v3_sub(pi, w->p[j]);
                 float r2 = v3_len2(d);
                 if (r2 < wet2) w->near_fluid[i] = 1;
-                if (r2 >= h2 || r2 < 1e-18f || w->lambda[j] == 0) continue;
+                float lj = live_lambda(w, j);
+                if (r2 >= h2 || r2 < 1e-18f || lj == 0) continue;
                 float r = sqrtf(r2);
-                dp = v3_madd(dp, d, w->mass[j] / w->mass[i] * w->lambda[j] * kernel_grad(r, h) * inv_rest / r);
+                dp = v3_madd(dp, d, w->mass[j] / w->mass[i] * lj * kernel_grad(r, h) * inv_rest / r);
             }
         } else {
             float li = w->lambda[i];
@@ -81,7 +82,7 @@ static void fluid_delta(sl_world *w, int begin, int end, int chunk, void *ctx) {
                 float r = w->nbr_r[n];
                 if (r < 1e-9f || (!(w->flags[j] & F_FLUID) && li == 0)) continue;
                 sl_vec3 d = v3_sub(pi, w->p[j]);
-                float l = li + ((w->flags[j] & F_FLUID) ? w->lambda[j] : 0.0f);
+                float l = li + ((w->flags[j] & F_FLUID) ? live_lambda(w, j) : 0.0f);
                 dp = v3_madd(dp, d, l * kernel_grad(r, h) * inv_rest / r);
                 if (r < near && (w->flags[j] & F_FLUID)) dp = v3_madd(dp, d, 0.5f * (near - r) / r);
             }
@@ -107,12 +108,12 @@ static void solve_contact_range(sl_world *w, int begin, int end, int chunk, void
     for (int k = base + begin; k < base + end; k++) {
         const contact *c = &w->contacts[k];
         int i = c->i, j = c->j;
-        if (!(w->flags[i] & F_AWAKE)) continue;
+        if (!((w->flags[i] | w->flags[j]) & F_AWAKE)) continue;
         float dist = c->dist, mu = c->mu, glue = 0;
         if (w->wet[i] && w->wet[j]) glue = c->glue * (float)(w->wet[i] < w->wet[j] ? w->wet[i] : w->wet[j]);
         sl_vec3 d = v3_sub(w->p[i], w->p[j]);
         float r2 = v3_len2(d);
-        float wi = w->inv_mass[i] * c->lift, wj = w->inv_mass[j], ws = wi + wj;
+        float wi = live_inv_mass(w, i) * c->lift, wj = live_inv_mass(w, j), ws = wi + wj;
         if (r2 < 1e-18f || ws <= 0) continue;
         if (r2 >= dist * dist) {
             /* Wet grains a little apart pull together, which is what lets wet sand clump and hold a shape. */
@@ -127,8 +128,8 @@ static void solve_contact_range(sl_world *w, int begin, int end, int chunk, void
         sl_vec3 n = v3_scale(d, 1.0f / r);
         /* Written only when they change: flags of nearby particles share cache lines across threads. */
         unsigned char fi = F_TOUCH | (w->flags[j] & F_FLUID ? F_WET : 0), fj = F_TOUCH | (w->flags[i] & F_FLUID ? F_WET : 0);
-        if ((w->flags[i] & fi) != fi) w->flags[i] |= fi;
-        if ((w->flags[j] & fj) != fj) w->flags[j] |= fj;
+        if (wi > 0 && (w->flags[i] & fi) != fi) w->flags[i] |= fi;
+        if (wj > 0 && (w->flags[j] & fj) != fj) w->flags[j] |= fj;
         w->p[i] = v3_madd(w->p[i], n, pen * wi / ws);
         w->p[j] = v3_madd(w->p[j], n, -pen * wj / ws);
 
@@ -150,10 +151,10 @@ static void stabilize_range(sl_world *w, int begin, int end, int chunk, void *ct
     for (int k = base + begin; k < base + end; k++) {
         const contact *c = &w->contacts[k];
         int i = c->i, j = c->j;
-        if (!(w->flags[i] & F_AWAKE) || (w->obj[i] >= 0 && w->obj[i] == w->obj[j])) continue;
+        if (w->obj[i] >= 0 && w->obj[i] == w->obj[j]) continue;
         float dist = c->dist;
         sl_vec3 d = v3_sub(w->x[i], w->x[j]);
-        float r2 = v3_len2(d), wi = w->inv_mass[i], wj = w->inv_mass[j], ws = wi + wj;
+        float r2 = v3_len2(d), wi = live_inv_mass(w, i), wj = live_inv_mass(w, j), ws = wi + wj;
         if (r2 >= dist * dist || r2 < 1e-18f || ws <= 0) continue;
         float r = sqrtf(r2), pen = dist - r;
         sl_vec3 n = v3_scale(d, 1.0f / r);
@@ -233,7 +234,11 @@ static void fluid_velocity(sl_world *w, int begin, int end, int chunk, void *ctx
             if (r2 >= h2) continue;
             float r = sqrtf(r2);
             visc = v3_madd(visc, v3_sub(w->v[j], w->v[i]), kernel(r, h) * inv_rest);
-            if (vort && r > 1e-9f) eta = v3_madd(eta, d, -(v3_len(w->tmp[j]) - wi) * kernel_grad(r, h) * inv_rest / r);
+            if (vort && r > 1e-9f) {
+                /* tmp holds curl only for awake particles; a sleeping one is still water, with no swirl. */
+                float wj = (w->flags[j] & F_AWAKE) ? v3_len(w->tmp[j]) : 0.0f;
+                eta = v3_madd(eta, d, -(wj - wi) * kernel_grad(r, h) * inv_rest / r);
+            }
             if (coh && r > d0) pull = v3_madd(pull, d, (r - d0) * (h - r) / (band * band * r));
         }
         sl_vec3 v = v3_madd(w->v[i], visc, visc_step[w->mat[i]]);

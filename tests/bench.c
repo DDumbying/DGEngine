@@ -56,7 +56,7 @@ static void row(const char *name, int workers, float size, int with_sand) {
 /* Mirrors the phase list in src/internal.h. */
 extern double sl__prof[];
 extern long sl__dispatches;
-static const char *PHASES[] = {"sort", "reorder", "pairs", "neighbors", "contacts", "color", "islands", "skin check",
+static const char *PHASES[] = {"sort", "reorder", "pairs", "contacts", "color", "islands", "skin check",
                                "stabilize", "predict", "fluid lambda", "fluid delta", "fluid apply", "solid contacts",
                                "objects", "colliders", "velocity", "fluid step", "extras", "whole step"};
 enum { PHASE_COUNT = sizeof PHASES / sizeof PHASES[0] };
@@ -90,9 +90,15 @@ static void phases(void) {
 #endif
 
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--phases") == 0) {
 #ifdef SLIME_PROFILE
-    if (argc > 1 && strcmp(argv[1], "--phases") == 0) { phases(); return 0; }
+        phases();
+        return 0;
+#else
+        fprintf(stderr, "--phases needs a build configured with -DSLIME_PROFILE=ON\n");
+        return 1;
 #endif
+    }
     float sizes[] = {0.6f, 1.0f, 1.4f, 1.8f};
     int quick = argc > 1 && strcmp(argv[1], "--quick") == 0;
     printf("%-12s %9s %8s %12s %12s %9s %11s\n", "scene", "particles", "workers", "first 1s ms", "after 26s ms", "awake", "bytes/part");

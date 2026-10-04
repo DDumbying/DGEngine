@@ -1117,6 +1117,94 @@ static void test_stray_particle_speed(void) {
     CHECK(stray < 1.2 * normal, "one far particle made steps %.2f ms instead of %.2f ms", stray, normal);
 }
 
+/* A fast grain sliding into a sleeping one must stop against it, not sink into it: the moving grain sits in the
+   higher slot, so the contact is listed under the sleeper while it is still asleep. */
+static void test_hit_sleeping_particle(void) {
+    sl_world *w = make_world(10);
+    sl_material m = sl_material_add(w, &(sl_material_desc){.kind = SL_GRANULAR, .density = 1600});
+    sl_collider_add(w, &(sl_collider_desc){.shape = SL_PLANE});
+    sl_particle a = sl_spawn(w, m, (sl_vec3){0, R, 0}, (sl_vec3){0, 0, 0});
+    steps(w, 60);
+    sl_stats st;
+    sl_get_stats(w, &st);
+    CHECK(st.awake == 0, "grain did not sleep, test does not apply");
+    sl_particle b = sl_spawn(w, m, (sl_vec3){1, R, 0}, (sl_vec3){-20, 0, 0});
+    float closest = 1e9f;
+    for (int s = 0; s < 30; s++) {
+        sl_step(w, DT);
+        closest = fminf(closest, dist(sl_position(w, a), sl_position(w, b)));
+    }
+    CHECK(closest > 1.5f * R, "moving grain sank into a sleeping one: centers %f apart", closest);
+    sl_world_destroy(w);
+}
+
+/* sl_get_stats reports exactly the bytes the world holds. */
+static size_t live_bytes;
+static void *sized_alloc(size_t size, void *user) {
+    (void)user;
+    size_t *p = malloc(size + 16);
+    if (!p) return NULL;
+    *p = size;
+    live_bytes += size;
+    return (char *)p + 16;
+}
+static void sized_free(void *ptr, void *user) {
+    (void)user;
+    size_t *p = (size_t *)(void *)((char *)ptr - 16);
+    live_bytes -= *p;
+    free(p);
+}
+
+static void test_memory_stats(void) {
+    sl_world_desc d = {0};
+    d.max_particles = 6000;
+    d.particle_radius = R;
+    d.gravity = (sl_vec3){0, -9.81f, 0};
+    d.anisotropy = 1;
+    d.max_diffuse = 1000;
+    d.allocator = (sl_allocator){sized_alloc, sized_free, NULL};
+    live_bytes = 0;
+    sl_world *w = sl_world_create(&d);
+    add_container(w, (sl_vec3){0.6f, 0.8f, 0.6f});
+    sl_spawn_box(w, water(w), (sl_vec3){-0.6f, -0.8f, -0.6f}, (sl_vec3){0.6f, -0.4f, 0.6f});
+    sl_material s = solid(w);
+    sl_object rope = sl_rope_create(w, s, (sl_vec3){-0.4f, 0.6f, 0}, (sl_vec3){0.4f, 0.6f, 0}, 0);
+    sl_cloth_create(w, s, (sl_vec3){-0.3f, 0.3f, -0.3f}, (sl_vec3){0.6f, 0, 0}, (sl_vec3){0, 0, 0.6f}, 0, 0.01f);
+    sl_softbody_create_box(w, s, (sl_vec3){0.1f, 0.0f, 0.1f}, (sl_vec3){0.4f, 0.3f, 0.4f}, 0.8f, 0.2f);
+    sl_object_destroy(w, rope);
+    steps(w, 30);
+    sl_stats st;
+    sl_get_stats(w, &st);
+    CHECK(st.memory_bytes == live_bytes, "stats report %zu bytes, the world holds %zu", st.memory_bytes, live_bytes);
+    sl_world_destroy(w);
+}
+
+/* Creating and destroying objects over and over keeps memory flat, and old handles stay dead. */
+static void test_object_churn(void) {
+    sl_world *w = make_world(200);
+    sl_material m = solid(w);
+    sl_object first = sl_rope_create(w, m, (sl_vec3){0, 1, 0}, (sl_vec3){0.5f, 1, 0}, 0);
+    sl_object_destroy(w, first);
+    size_t base = 0;
+    for (int k = 0; k < 2000; k++) {
+        sl_object o = sl_rope_create(w, m, (sl_vec3){0, 1, 0}, (sl_vec3){0.5f, 1, 0}, 0);
+        sl_object_destroy(w, o);
+        if (k == 10) { sl_stats st; sl_get_stats(w, &st); base = st.memory_bytes; }
+    }
+    sl_stats st;
+    sl_get_stats(w, &st);
+    CHECK(st.memory_bytes == base, "memory grew from %zu to %zu bytes over 2000 ropes", base, st.memory_bytes);
+    sl_object again = sl_rope_create(w, m, (sl_vec3){0, 1, 0}, (sl_vec3){0.5f, 1, 0}, 0);
+    CHECK(again >= 0 && again != first, "a new rope got the old handle %d", again);
+    CHECK(sl_object_particles(w, first, NULL) == 0 && sl_object_particles(w, again, NULL) > 0, "old rope handle came back");
+    sl_object_destroy(w, first);
+    CHECK(sl_object_particles(w, again, NULL) > 0, "destroying an old handle removed the new rope");
+    sl_clear(w);
+    sl_object after = sl_rope_create(w, m, (sl_vec3){0, 1, 0}, (sl_vec3){0.5f, 1, 0}, 0);
+    CHECK(after >= 0 && sl_object_particles(w, again, NULL) == 0, "rope handle from before sl_clear still alive");
+    sl_world_destroy(w);
+}
+
 #ifndef _WIN32
 /* Idle workers must not burn a core each while the main thread is busy alone: the allocator below stalls the main
    thread for 200 ms inside a step, a stand-in for a long serial phase, and the process CPU time is measured. */
@@ -1219,6 +1307,9 @@ int main(int argc, char **argv) {
         {"force on three colliders", test_force_three_colliders},
         {"stray particle speed", test_stray_particle_speed},
         {"tiny world", test_tiny_world},
+        {"hit sleeping particle", test_hit_sleeping_particle},
+        {"memory stats", test_memory_stats},
+        {"object churn", test_object_churn},
 #ifndef _WIN32
         {"idle workers block", test_idle_workers_block},
 #endif
