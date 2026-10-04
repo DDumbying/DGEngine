@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <string.h>
 #include "internal.h"
 
@@ -132,6 +133,29 @@ static sl_object cloth_create(sl_world *w, sl_material m, sl_vec3 origin, sl_vec
 static int axis_blocks(int n) { return n <= 5 ? 1 : (n - 4) / 2 + 1; }
 static int block_hi(int n, int c) { return 2 * c + 4 < n - 1 ? 2 * c + 4 : n - 1; }
 
+/* One shape matching cluster over the given slots; rest offsets are taken from where they are now. */
+static int add_cluster(sl_world *w, int obj, const int *slots, int size, float stiffness, float plasticity) {
+    if (!sl__grow(w, (void **)&w->clusters, &w->cluster_cap, w->cluster_count + 1, sizeof(cluster))
+        || !sl__grow(w, (void **)&w->members, &w->member_cap, w->member_count + size, sizeof(member))) return 0;
+    cluster *c = &w->clusters[w->cluster_count++];
+    c->first = w->member_count;
+    c->count = size;
+    c->obj = obj;
+    c->stiffness = stiffness < 0 ? 0 : (stiffness > 1 ? 1 : stiffness);
+    c->plasticity = plasticity < 0 ? 0 : (plasticity > 1 ? 1 : plasticity);
+    /* Applied every pass, so spread over all passes in a step to match the asked stiffness. */
+    c->pull = c->stiffness >= 1 ? 1.0f : 1.0f - sl_pow(1.0f - c->stiffness, 1.0f / (float)(w->substeps * w->iterations));
+    c->rot = q_identity();
+    sl_vec3 center = v3(0, 0, 0);
+    for (int k = 0; k < size; k++) {
+        w->members[w->member_count++] = (member){slots[k], w->cluster_count - 1, w->x[slots[k]]};
+        center = v3_add(center, w->x[slots[k]]);
+    }
+    c->center = v3_scale(center, 1.0f / (float)size);
+    for (int q = c->first; q < c->first + size; q++) w->members[q].rest = v3_sub(w->members[q].rest, c->center);
+    return 1;
+}
+
 static sl_object softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max,
                                      float stiffness, float plasticity) {
     if (!valid_material(w, m)) return -1;
@@ -156,33 +180,107 @@ static sl_object softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl
             }
 
     const sl_particle *ids = w->objects[obj].ids;
+    int block[125];
     for (int cz = 0; ok && cz < axis_blocks(n[2]); cz++)
         for (int cy = 0; ok && cy < axis_blocks(n[1]); cy++)
             for (int cx = 0; ok && cx < axis_blocks(n[0]); cx++) {
                 int lo[3] = {2 * cx, 2 * cy, 2 * cz}, hi[3] = {block_hi(n[0], cx), block_hi(n[1], cy), block_hi(n[2], cz)};
-                int size = (hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1);
-                if (!sl__grow(w, (void **)&w->clusters, &w->cluster_cap, w->cluster_count + 1, sizeof(cluster))
-                    || !sl__grow(w, (void **)&w->members, &w->member_cap, w->member_count + size, sizeof(member))) { ok = 0; break; }
-                cluster *c = &w->clusters[w->cluster_count++];
-                c->first = w->member_count;
-                c->count = size;
-                c->obj = obj;
-                c->stiffness = stiffness < 0 ? 0 : (stiffness > 1 ? 1 : stiffness);
-                c->plasticity = plasticity < 0 ? 0 : (plasticity > 1 ? 1 : plasticity);
-                /* Applied every pass, so spread over all passes in a step to match the asked stiffness. */
-                c->pull = c->stiffness >= 1 ? 1.0f : 1.0f - sl_pow(1.0f - c->stiffness, 1.0f / (float)(w->substeps * w->iterations));
-                c->rot = q_identity();
-                sl_vec3 center = v3(0, 0, 0);
+                int size = 0;
                 for (int k = lo[2]; k <= hi[2]; k++)
                     for (int j = lo[1]; j <= hi[1]; j++)
-                        for (int i = lo[0]; i <= hi[0]; i++) {
-                            int s = sl__slot_of(w, ids[(k * n[1] + j) * n[0] + i]);
-                            w->members[w->member_count++] = (member){s, w->cluster_count - 1, w->x[s]};
-                            center = v3_add(center, w->x[s]);
-                        }
-                c->center = v3_scale(center, 1.0f / (float)size);
-                for (int q = c->first; q < c->first + size; q++) w->members[q].rest = v3_sub(w->members[q].rest, c->center);
+                        for (int i = lo[0]; i <= hi[0]; i++) block[size++] = sl__slot_of(w, ids[(k * n[1] + j) * n[0] + i]);
+                ok = add_cluster(w, obj, block, size, stiffness, plasticity);
             }
+    return finish(w, obj, ok);
+}
+
+typedef struct { long long block; int particle; } block_ref;
+
+static int by_block(const void *a, const void *b) {
+    const block_ref *x = a, *y = b;
+    if (x->block != y->block) return x->block < y->block ? -1 : 1;
+    return (x->particle > y->particle) - (x->particle < y->particle);
+}
+
+/* Any shape: the points snap to lattice cells, and clusters are the same overlapping blocks of 5 cells as for
+   a box, over the cells that are occupied; blocks are taken in a fixed order, so it stays deterministic. */
+static sl_object softbody_create_points(sl_world *w, sl_material m, const sl_vec3 *pts, int count,
+                                        float stiffness, float plasticity) {
+    if (!valid_material(w, m) || !pts || count < 1) return -1;
+    sl_vec3 lo = pts[0];
+    for (int i = 0; i < count; i++) {
+        if (!v3_finite(pts[i])) return -1;
+        lo = v3(sl_min(lo.x, pts[i].x), sl_min(lo.y, pts[i].y), sl_min(lo.z, pts[i].z));
+    }
+    float d = w->spacing;
+    int n[3] = {1, 1, 1};
+    for (int i = 0; i < count; i++) {
+        const float *p = &pts[i].x, *o = &lo.x;
+        for (int a = 0; a < 3; a++) {
+            float c = floorf((p[a] - o[a]) / d + 0.5f);
+            if (!(c < (float)(1 << 20))) return -1;   /* spread too far for one body */
+            if ((int)c + 1 > n[a]) n[a] = (int)c + 1;
+        }
+    }
+    int obj = new_object(w, OBJ_SOFT);
+    if (obj < 0) return -1;
+    w->objects[obj].self_dist = 0.9f * d;
+    int ok = alloc_ids(w, obj, count);
+    for (int i = 0; ok && i < count; i++) ok = spawn_into(w, obj, m, pts[i]);
+
+    long long nb[3] = {axis_blocks(n[0]), axis_blocks(n[1]), axis_blocks(n[2])};
+    block_ref *refs = ok ? sl__alloc(w, (size_t)count * 27 * sizeof(block_ref)) : NULL;
+    int nref = 0;
+    if (!refs) ok = 0;
+    for (int i = 0; ok && i < count; i++) {
+        int cell[3], b0[3], b1[3];
+        const float *p = &pts[i].x, *o = &lo.x;
+        for (int a = 0; a < 3; a++) {
+            cell[a] = (int)floorf((p[a] - o[a]) / d + 0.5f);
+            b0[a] = cell[a] <= 4 ? 0 : (cell[a] - 3) / 2;   /* blocks b with 2b <= cell <= 2b + 4 */
+            b1[a] = cell[a] / 2 < (int)nb[a] - 1 ? cell[a] / 2 : (int)nb[a] - 1;
+        }
+        for (int z = b0[2]; z <= b1[2]; z++)
+            for (int y = b0[1]; y <= b1[1]; y++)
+                for (int x = b0[0]; x <= b1[0]; x++)
+                    refs[nref++] = (block_ref){((long long)z * nb[1] + y) * nb[0] + x, i};
+    }
+    if (ok) qsort(refs, (size_t)nref, sizeof *refs, by_block);
+    int *slots = ok ? sl__alloc(w, (size_t)count * sizeof(int)) : NULL;
+    if (ok && !slots) ok = 0;
+    const sl_particle *ids = w->objects[obj].ids;
+    for (int k = 0; ok && k < nref;) {
+        int size = 0, start = k;
+        while (k < nref && refs[k].block == refs[start].block) slots[size++] = sl__slot_of(w, ids[refs[k++].particle]);
+        if (size >= 2) ok = add_cluster(w, obj, slots, size, stiffness, plasticity);   /* one particle alone holds nothing */
+    }
+    sl__free(w, slots);
+    sl__free(w, refs);
+    return finish(w, obj, ok);
+}
+
+/* A rope along a polyline, resampled at particle spacing by length along the path. */
+static sl_object rope_create_path(sl_world *w, sl_material m, const sl_vec3 *pts, int count, float compliance) {
+    if (!valid_material(w, m) || !pts || count < 2) return -1;
+    for (int i = 0; i < count; i++) if (!v3_finite(pts[i])) return -1;
+    if (count == 2) return rope_create(w, m, pts[0], pts[1], compliance);
+    float total = 0;
+    for (int i = 0; i + 1 < count; i++) total += v3_len(v3_sub(pts[i + 1], pts[i]));
+    int n = (int)roundf(total / w->spacing) + 1;
+    if (n < 2) n = 2;
+    int obj = new_object(w, OBJ_ROPE);
+    if (obj < 0) return -1;
+    w->objects[obj].self_dist = sl_min(w->spacing, 0.9f * total / (float)(n - 1));
+    int ok = alloc_ids(w, obj, n), seg = 0;
+    float start = 0, len = v3_len(v3_sub(pts[1], pts[0]));
+    for (int i = 0; ok && i < n; i++) {
+        float at = total * (float)i / (float)(n - 1);
+        while (seg < count - 2 && start + len < at) { start += len; seg++; len = v3_len(v3_sub(pts[seg + 1], pts[seg])); }
+        float t = len > 0 ? sl_min(sl_max((at - start) / len, 0.0f), 1.0f) : 0.0f;
+        ok = spawn_into(w, obj, m, i == n - 1 ? pts[count - 1] : v3_lerp(pts[seg], pts[seg + 1], t));
+    }
+    const sl_particle *ids = w->objects[obj].ids;
+    for (int i = 0; ok && i + 1 < n; i++) ok = add_dist(w, obj, sl__slot_of(w, ids[i]), sl__slot_of(w, ids[i + 1]), compliance);
     return finish(w, obj, ok);
 }
 
@@ -206,6 +304,20 @@ sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec
                                  float stiffness, float plasticity) {
     sl_fpmode fpmode = sl_fp_enter();
     sl_object o = softbody_create_box(w, m, min, max, stiffness, plasticity);
+    sl_fp_leave(fpmode);
+    return o;
+}
+
+sl_object sl_rope_create_path(sl_world *w, sl_material m, const sl_vec3 *points, int count, float compliance) {
+    sl_fpmode fpmode = sl_fp_enter();
+    sl_object o = rope_create_path(w, m, points, count, compliance);
+    sl_fp_leave(fpmode);
+    return o;
+}
+
+sl_object sl_softbody_create(sl_world *w, sl_material m, const sl_vec3 *points, int count, float stiffness, float plasticity) {
+    sl_fpmode fpmode = sl_fp_enter();
+    sl_object o = softbody_create_points(w, m, points, count, stiffness, plasticity);
     sl_fp_leave(fpmode);
     return o;
 }

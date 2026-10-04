@@ -155,17 +155,27 @@ static void push_out(sl_world *w, int i, sl_vec3 n, float pen, sl_vec3 surf_move
     sl__book_push(w, i, c, v3_scale(v3_sub(w->p[i], before), -w->mass[i] / w->hs));
 }
 
-/* Steps along the move of a fast particle so it cannot pass through a thin collider. A particle
-   already touching at the start is left to the contact, so it can still slide along the surface. */
-static void sweep(sl_world *w, int i, const collider *col, float len) {
-    sl_vec3 from = w->x[i], dir = v3_scale(v3_sub(w->p[i], from), 1.0f / len), n;
-    float r = w->radius, t = 0;
-    quat inv = q_conj(col->rot_t);
-    if (sdf_local(&col->desc, q_rotate(inv, v3_sub(from, col->pos_t)), &n) < r) return;
-    while (t < len) {
+/* Steps along a particle's move relative to the collider, in the collider's own frame: from where it was in
+   the frame at the start of the substep to where it is in the frame at the end. That catches fast particles
+   and fast colliders alike, so neither can pass through the other. A particle already touching at the start
+   keeps sliding along the surface; only the part of its move that goes into the surface is dropped. */
+static void sweep(sl_world *w, int i, const collider *col) {
+    float r = w->radius;
+    sl_vec3 from = q_rotate(q_conj(col->rot_t0), v3_sub(w->x[i], col->pos_t0));
+    sl_vec3 to = q_rotate(q_conj(col->rot_t), v3_sub(w->p[i], col->pos_t)), n;
+    sl_vec3 move = v3_sub(to, from);
+    float len = v3_len(move);
+    if (len <= r) return;
+    if (sdf_local(&col->desc, from, &n) < r) {
+        float in = v3_dot(move, n);
+        if (in < 0) w->p[i] = v3_add(col->pos_t, q_rotate(col->rot_t, v3_madd(to, n, -in)));
+        return;
+    }
+    sl_vec3 dir = v3_scale(move, 1.0f / len);
+    for (float t = 0; t < len;) {
         sl_vec3 q = v3_madd(from, dir, t);
-        float dist = sdf_local(&col->desc, q_rotate(inv, v3_sub(q, col->pos_t)), &n);
-        if (dist < r) { w->p[i] = q; return; }
+        float dist = sdf_local(&col->desc, q, &n);
+        if (dist < r) { w->p[i] = v3_add(col->pos_t, q_rotate(col->rot_t, q)); return; }
         t += sl_max(dist - r, 0.5f * r);
     }
 }
@@ -186,15 +196,19 @@ static void collide_range(sl_world *w, int begin, int end, int chunk, void *ctx)
         int can_tunnel = !d->inside && d->shape != SL_PLANE;
         quat inv = q_conj(col->rot_t);
         float mu = d->friction, far = sl__bound_radius(d) + r;
+        /* How far any point of the shape moved this substep, so particles it sweeps over are not skipped. */
+        quat q0 = col->rot_t0, q1 = col->rot_t;
+        int turned = q0.x != q1.x || q0.y != q1.y || q0.z != q1.z || q0.w != q1.w;
+        float travel = v3_len(v3_sub(col->pos_t, col->pos_t0)) + (turned ? 2.0f * sl__bound_radius(d) : 0.0f);
 
         for (int k = begin; k < end; k++) {
             int i = w->active[k];
             if (w->flags[i] & F_KINEMATIC) continue;
             if (can_tunnel) {
-                float len = v3_len(v3_sub(w->p[i], w->x[i]));
-                /* Far from the shape and too slow to reach it: nothing to do. */
-                if (len <= r && v3_len2(v3_sub(w->p[i], col->pos_t)) > far * far) continue;
-                if (len > r) sweep(w, i, col, len);
+                float len = v3_len(v3_sub(w->p[i], w->x[i])), reach = far + travel;
+                /* Far from everywhere the shape went and too slow to reach it: nothing to do. */
+                if (len <= r && v3_len2(v3_sub(w->p[i], col->pos_t)) > reach * reach) continue;
+                if (len > r || travel > r) sweep(w, i, col);
             }
             sl_vec3 local = q_rotate(inv, v3_sub(w->p[i], col->pos_t));
 

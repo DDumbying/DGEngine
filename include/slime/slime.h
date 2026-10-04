@@ -107,6 +107,14 @@ SL_API void sl_world_destroy(sl_world *w);
 
 /* Returns -1 when SL_MAX_MATERIALS is reached, or for an unknown kind or a negative or non-finite value. */
 SL_API sl_material sl_material_add(sl_world *w, const sl_material_desc *desc);
+/* Changes a material for every particle made of it while the world runs: density changes their mass, kind
+   changes how loose particles behave (particles of ropes, cloth and soft bodies stay solid). Validated like
+   sl_material_add; returns 1 on success, 0 leaving the material unchanged. */
+SL_API int sl_material_set(sl_world *w, sl_material m, const sl_material_desc *desc);
+SL_API int sl_material_get(const sl_world *w, sl_material m, sl_material_desc *out);
+/* Gravity can change at any time; sleeping particles wake to feel it. Non-finite values are ignored. */
+SL_API void sl_set_gravity(sl_world *w, sl_vec3 gravity);
+SL_API sl_vec3 sl_gravity(const sl_world *w);
 
 /* Returns -1 when full or the material is invalid. */
 SL_API sl_particle sl_spawn(sl_world *w, sl_material m, sl_vec3 pos, sl_vec3 vel);
@@ -114,6 +122,9 @@ SL_API sl_particle sl_spawn(sl_world *w, sl_material m, sl_vec3 pos, sl_vec3 vel
 SL_API int sl_spawn_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max);
 /* Particles that belong to an object can only go with sl_object_destroy. Returns 1 on success. */
 SL_API int sl_remove(sl_world *w, sl_particle p);
+/* Removes many loose particles in one pass, which is much cheaper than sl_remove in a loop; ids that are dead,
+   repeated or belong to an object are skipped. Returns how many went. */
+SL_API int sl_remove_many(sl_world *w, const sl_particle *ids, int count);
 SL_API void sl_clear(sl_world *w);
 
 SL_API int sl_alive(const sl_world *w, sl_particle p);
@@ -126,6 +137,9 @@ SL_API void sl_pin(sl_world *w, sl_particle p, int pinned);
 
 /* Returns -1 when SL_MAX_COLLIDERS is reached, or for an unknown shape or a negative or non-finite value. */
 SL_API sl_collider sl_collider_add(sl_world *w, const sl_collider_desc *desc);
+/* Changes shape, size, normal, inside and friction at once; position and rotation become the target for the
+   next step, as with sl_collider_move. Validated like sl_collider_add; returns 1 on success, 0 otherwise. */
+SL_API int sl_collider_set(sl_world *w, sl_collider c, const sl_collider_desc *desc);
 /* Target transform for the next step; the collider sweeps there and pushes particles. Non-finite input is ignored. */
 SL_API void sl_collider_move(sl_world *w, sl_collider c, sl_vec3 position, const float rotation[4]);
 /* Force particles put on the collider during the last step, to feed a rigid-body engine. Each particle can load
@@ -138,6 +152,14 @@ SL_API void sl_collider_remove(sl_world *w, sl_collider c);
 
 /* Nearest particle hit by a ray, -1 if none; hit_dist may be NULL. */
 SL_API sl_particle sl_raycast(const sl_world *w, sl_vec3 origin, sl_vec3 dir, float max_dist, float *hit_dist);
+/* Particles whose centers lie in a region described like a collider: box, sphere, capsule or plane (the solid
+   half-space behind its normal), rotated and positioned, with inside flipping it. materials is a bit mask (bit m for material m), 0 for all. Up to cap
+   ids are written in slot order and the full count is returned; ids and out may be NULL. out gets the count,
+   total mass and mass-weighted center and velocity, enough for "is this under water", "how much sand is in the
+   bucket" or drag and buoyancy on a game's own bodies. One pass over the particles; read only. */
+typedef struct { int count; float mass; sl_vec3 center, velocity; } sl_query_result;
+SL_API int sl_query(const sl_world *w, const sl_collider_desc *shape, unsigned materials, sl_particle *ids, int cap,
+                    sl_query_result *out);
 /* Hold a particle and move it to target each step; on release it keeps its velocity, so it can be thrown. */
 SL_API int sl_grab_begin(sl_world *w, sl_particle p);
 SL_API void sl_grab_move(sl_world *w, sl_particle p, sl_vec3 target);
@@ -152,6 +174,12 @@ SL_API sl_object sl_cloth_create(sl_world *w, sl_material m, sl_vec3 origin, sl_
 /* stiffness 0..1 pulls back to shape, plasticity 0..1 keeps dents. */
 SL_API sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max,
                                  float stiffness, float plasticity);
+/* A rope along a polyline of count >= 2 points, resampled at particle spacing. */
+SL_API sl_object sl_rope_create_path(sl_world *w, sl_material m, const sl_vec3 *points, int count, float compliance);
+/* A soft body of any shape, one particle per point; space the points about 2 * radius apart, for example a mesh
+   sampled on a lattice. Clusters work as for the box version, so stiffness and plasticity mean the same. */
+SL_API sl_object sl_softbody_create(sl_world *w, sl_material m, const sl_vec3 *points, int count,
+                                    float stiffness, float plasticity);
 SL_API void sl_object_destroy(sl_world *w, sl_object o);
 /* Particle ids of the object in creation order (rope from a to b, cloth row by row). */
 SL_API int sl_object_particles(const sl_world *w, sl_object o, const sl_particle **ids);

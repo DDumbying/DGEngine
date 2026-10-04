@@ -1341,7 +1341,8 @@ static void test_snapshot_rollback(void) {
     size_t size;
     void *snap = take_snapshot(w, &size);
     uint64_t at_save = sl_state_hash(w);
-    for (int f = 90; f < 150; f++) busy_inputs(w, &h, f);
+    uint64_t frames[60];   /* every frame, since some state can differ for a while and then heal */
+    for (int f = 90; f < 150; f++) { busy_inputs(w, &h, f); frames[f - 90] = sl_state_hash(w); }
     uint64_t first = sl_state_hash(w);
     int count = sl_count(w);
     sl_vec3 *pos = malloc(sizeof(sl_vec3) * (size_t)count);
@@ -1349,7 +1350,9 @@ static void test_snapshot_rollback(void) {
 
     CHECK(sl_snapshot_load(w, snap, size) == SL_SNAPSHOT_OK, "load failed");
     CHECK(sl_state_hash(w) == at_save, "restored state hashes differently from the saved one");
-    for (int f = 90; f < 150; f++) busy_inputs(w, &h, f);
+    int diverged = -1;
+    for (int f = 90; f < 150; f++) { busy_inputs(w, &h, f); if (diverged < 0 && sl_state_hash(w) != frames[f - 90]) diverged = f; }
+    CHECK(diverged < 0, "replay after a rollback diverged at frame %d", diverged);
     CHECK(sl_state_hash(w) == first && sl_count(w) == count
           && memcmp(sl_positions(w), pos, sizeof(sl_vec3) * (size_t)count) == 0, "replay after a rollback diverged");
     CHECK(sl_object_particles(w, h.rope, NULL) > 0 && sl_alive(w, h.grabbed) && sl_collider_enabled(w, h.ball),
@@ -1610,7 +1613,7 @@ static void test_snapshot_ellipsoids(void) {
 
 /* Every platform, compiler and worker count must reach this hash for the golden scene. It changes only when the
    solver changes on purpose; update it then, in the same change. */
-#define GOLDEN_HASH 0x40ee763b60af65b1ull
+#define GOLDEN_HASH 0x9745005ceb8487feull
 
 /* Water, sand, a rope, cloth, a soft body, a moving ball and a grab. The inputs use only values that are exact
    or a single rounding away, because this test is not compiled with the library's strict float settings. */
@@ -1704,6 +1707,305 @@ static void test_golden_hash(void) {
 #endif
 }
 
+/* ---------- runtime control ---------- */
+
+/* Gravity can change while the world runs, and sleeping particles feel it. */
+static void test_set_gravity(void) {
+    sl_world *w = sleeping_pile(3000);
+    sl_stats st;
+    sl_get_stats(w, &st);
+    CHECK(st.awake == 0, "pile did not sleep, test does not apply");
+    sl_vec3 g = {-12, -4, 0};   /* well past the friction angle, so the pile must slide */
+    sl_set_gravity(w, g);
+    sl_vec3 back = sl_gravity(w);
+    CHECK(back.x == g.x && back.y == g.y && back.z == g.z, "sl_gravity does not report the new gravity");
+    float before = 0;
+    for (int s = 0; s < sl_count(w); s++) before += sl_positions(w)[s].x / (float)sl_count(w);
+    steps(w, 60);
+    float after = 0;
+    for (int s = 0; s < sl_count(w); s++) after += sl_positions(w)[s].x / (float)sl_count(w);
+    CHECK(after < before - 0.1f, "the pile did not slide with sideways gravity: %f to %f", before, after);
+    sl_set_gravity(w, (sl_vec3){NAN, 0, 0});
+    CHECK(sl_gravity(w).x == g.x, "a NaN gravity was accepted");
+    sl_world_destroy(w);
+}
+
+/* Materials can change while the world runs: sand turned to water flows out, a cork made heavy sinks, and
+   ropes made of a material that turns fluid stay ropes. */
+static void test_material_set(void) {
+    sl_world *w = make_world(3000);
+    add_floor(w, 0.6f);
+    sl_material m = sand(w);
+    sl_spawn_box(w, m, (sl_vec3){-0.3f, 0, -0.3f}, (sl_vec3){0.3f, 0.5f, 0.3f});
+    steps(w, 120);
+    float tall = max_height(w);
+    sl_material_desc d;
+    CHECK(sl_material_get(w, m, &d) && d.kind == SL_GRANULAR && d.density == 1600, "sl_material_get does not report the material");
+    d.kind = SL_FLUID;
+    d.viscosity = 0.01f;
+    CHECK(sl_material_set(w, m, &d) == 1, "valid change refused");
+    steps(w, 240);
+    CHECK(max_height(w) < 0.5f * tall, "sand turned to water did not flow: %f, was %f", max_height(w), tall);
+    sl_material_desc bad = d;
+    bad.damping = -1;
+    CHECK(sl_material_set(w, m, &bad) == 0 && sl_material_set(w, 99, &d) == 0, "invalid changes accepted");
+    CHECK(sl_material_get(w, m, &d) && d.damping == 0, "a refused change altered the material");
+    sl_world_destroy(w);
+
+    w = make_world(8000);
+    add_container(w, (sl_vec3){0.6f, 0.8f, 0.6f});
+    sl_spawn_box(w, water(w), (sl_vec3){-0.6f, -0.8f, -0.6f}, (sl_vec3){0.6f, 0.0f, 0.6f});
+    sl_material cork = sl_material_add(w, &(sl_material_desc){.kind = SL_SOLID, .density = 500, .friction = 0.3f, .damping = 1});
+    sl_object body = sl_softbody_create_box(w, cork, (sl_vec3){-0.15f, 0.1f, -0.15f}, (sl_vec3){0.15f, 0.4f, 0.15f}, 1, 0);
+    steps(w, 300);
+    const sl_particle *ids;
+    int n = sl_object_particles(w, body, &ids);
+    float floating = 0;
+    for (int i = 0; i < n; i++) floating += sl_position(w, ids[i]).y / (float)n;
+    sl_material_desc heavy = {.kind = SL_FLUID, .density = 3000, .friction = 0.3f, .damping = 1};
+    CHECK(sl_material_set(w, cork, &heavy) == 1, "change refused");
+    steps(w, 300);
+    float sunk = 0;
+    for (int i = 0; i < n; i++) sunk += sl_position(w, ids[i]).y / (float)n;
+    CHECK(sunk < floating - 0.3f, "the cork made heavy did not sink: %f, floated at %f", sunk, floating);
+    float hi = -1e9f, lo = 1e9f;
+    for (int i = 0; i < n; i++) { float y = sl_position(w, ids[i]).y; hi = fmaxf(hi, y); lo = fminf(lo, y); }
+    CHECK(hi - lo < 0.45f, "the body's particles turned fluid and spread: %f tall", hi - lo);
+    sl_world_destroy(w);
+}
+
+/* A collider's shape and size can change while the world runs. */
+static void test_collider_set(void) {
+    sl_world *w = make_world(3000);
+    sl_collider_desc table = {.shape = SL_BOX, .position = {0, -0.1f, 0}, .half_extents = {0.6f, 0.1f, 0.6f}, .friction = 0.6f};
+    sl_collider c = sl_collider_add(w, &table);
+    sl_spawn_box(w, sand(w), (sl_vec3){-0.4f, 0, -0.4f}, (sl_vec3){0.4f, 0.2f, 0.4f});
+    steps(w, 120);
+    CHECK(max_height(w) > 0.1f, "sand fell off the table, test does not apply");
+    sl_collider_desc small = table;
+    small.half_extents = (sl_vec3){0.1f, 0.1f, 0.1f};
+    CHECK(sl_collider_set(w, c, &small) == 1, "valid change refused");
+    sl_collider_desc bad = table;
+    bad.radius = -1;
+    CHECK(sl_collider_set(w, c, &bad) == 0 && sl_collider_set(w, 40, &table) == 0, "invalid changes accepted");
+    steps(w, 90);
+    int fell = 0;
+    for (int s = 0; s < sl_count(w); s++) fell += sl_positions(w)[s].y < -0.5f;
+    CHECK(fell > sl_count(w) / 2, "only %d of %d grains fell off the shrunken table", fell, sl_count(w));
+    sl_world_destroy(w);
+}
+
+/* Many particles go in one call, without one compaction each, and object particles are left alone. */
+static void test_remove_many(void) {
+    sl_world *w = make_world(25000);
+    sl_material m = sand(w);
+    int sand_n = sl_spawn_box(w, m, (sl_vec3){-1, 0, -1}, (sl_vec3){1, 5, 1});
+    sl_object rope = sl_rope_create(w, solid(w), (sl_vec3){-1, 6, 0}, (sl_vec3){1, 6, 0}, 0);
+    int before = sl_count(w), n = 0;
+    sl_particle *doomed = malloc(sizeof(sl_particle) * 12000);
+    for (int s = 0; s < sand_n; s += 2) doomed[n++] = sl_ids(w)[s];   /* slots are still in spawn order */
+    const sl_particle *rope_ids;
+    sl_object_particles(w, rope, &rope_ids);
+    doomed[n++] = rope_ids[0];
+    doomed[n++] = doomed[0];   /* a repeat counts once */
+    double t = wall_now();
+    int gone = sl_remove_many(w, doomed, n);
+    t = wall_now() - t;
+    CHECK(gone == n - 2 && sl_count(w) == before - gone, "removed %d of %d loose particles, count %d of %d", gone, n - 2, sl_count(w), before);
+    CHECK(sl_alive(w, rope_ids[0]) && !sl_alive(w, doomed[1]), "wrong particles survived");
+    CHECK(t < 0.01, "removing %d particles took %.1f ms", gone, t * 1000);
+    free(doomed);
+    sl_world_destroy(w);
+}
+
+/* ---------- queries ---------- */
+
+/* Brute-force reference for queries: particles of the masked materials whose centers pass the test. */
+static int count_where(const sl_world *w, unsigned mask, int (*inside)(sl_vec3 p, const void *ctx), const void *ctx,
+                       float *mass, sl_particle *ids, int cap) {
+    int n = 0;
+    *mass = 0;
+    for (int s = 0; s < sl_count(w); s++) {
+        if (mask && !(mask & (1u << sl_materials(w)[s]))) continue;
+        if (!inside(sl_positions(w)[s], ctx)) continue;
+        if (ids && n < cap) ids[n] = sl_ids(w)[s];
+        n++;
+    }
+    return n;
+}
+static int in_sphere(sl_vec3 p, const void *ctx) { const float *c = ctx; return dist(p, (sl_vec3){c[0], c[1], c[2]}) <= c[3]; }
+static int below(sl_vec3 p, const void *ctx) { return p.y <= *(const float *)ctx; }
+static int everywhere(sl_vec3 p, const void *ctx) { (void)p; (void)ctx; return 1; }
+
+/* Which particles are where, and how much of what: shapes, masks, inside, summaries and the id buffer. */
+static void test_query(void) {
+    sl_world *w = make_world(6000);
+    add_container(w, (sl_vec3){0.6f, 0.8f, 0.6f});
+    sl_material wat = water(w), snd = sand(w);
+    sl_spawn_box(w, wat, (sl_vec3){-0.6f, -0.8f, -0.6f}, (sl_vec3){0.6f, -0.4f, 0.6f});
+    int grains = sl_spawn_box(w, snd, (sl_vec3){-0.2f, -0.2f, -0.2f}, (sl_vec3){0.2f, 0.2f, 0.2f});
+    steps(w, 200);
+    float ref_mass;
+    sl_query_result r;
+
+    /* Under water and above it. */
+    sl_collider_desc probe = {.shape = SL_SPHERE, .radius = 0.15f, .position = {0.3f, -0.7f, 0.3f}};
+    float sphere[4] = {0.3f, -0.7f, 0.3f, 0.15f};
+    int n = sl_query(w, &probe, 1u << wat, NULL, 0, &r);
+    CHECK(n > 0 && n == r.count && n == count_where(w, 1u << wat, in_sphere, sphere, &ref_mass, NULL, 0),
+          "underwater sphere found %d, brute force %d", n, count_where(w, 1u << wat, in_sphere, sphere, &ref_mass, NULL, 0));
+    CHECK(dist(r.center, probe.position) < 0.15f && fabsf(r.velocity.y) < 0.2f, "summary of resting water is off");
+    probe.position = (sl_vec3){0.4f, 0.6f, 0.4f};
+    CHECK(sl_query(w, &probe, 1u << wat, NULL, 0, &r) == 0 && r.count == 0 && r.mass == 0, "found water in the air");
+
+    /* Everything, with total mass; then only sand. */
+    sl_collider_desc all = {.shape = SL_BOX, .half_extents = {5, 5, 5}};
+    n = sl_query(w, &all, 0, NULL, 0, &r);
+    count_where(w, 0, everywhere, NULL, &ref_mass, NULL, 0);
+    float want_mass = (float)(sl_count(w) - grains) * 1000 * 0.001f + (float)grains * 1600 * 0.001f;
+    CHECK(n == sl_count(w) && fabsf(r.mass / want_mass - 1) < 1e-3f, "whole world: %d of %d, mass %f of %f", n, sl_count(w), r.mass, want_mass);
+    CHECK(sl_query(w, &all, 1u << snd, NULL, 0, NULL) == grains, "sand mask did not count the sand");
+
+    /* A plane is the solid half-space behind its normal, as for a collider; inside flips the region. */
+    sl_collider_desc floor = {.shape = SL_PLANE, .position = {0, -0.5f, 0}};
+    float level = -0.5f;
+    CHECK(sl_query(w, &floor, 0, NULL, 0, NULL) == count_where(w, 0, below, &level, &ref_mass, NULL, 0),
+          "plane query does not match the half-space below it");
+    sl_collider_desc hollow = {.shape = SL_SPHERE, .radius = 0.15f, .position = {0.3f, -0.7f, 0.3f}, .inside = 1};
+    CHECK(sl_query(w, &hollow, 0, NULL, 0, NULL) == sl_count(w) - count_where(w, 0, in_sphere, sphere, &ref_mass, NULL, 0),
+          "inside did not flip the region");
+
+    /* A rotated box holds the same particles as the same box seen in its own frame. */
+    sl_collider_desc tilted = {.shape = SL_BOX, .half_extents = {0.6f, 0.05f, 0.6f}, .position = {0, -0.6f, 0}, .rotation = {0, 0, 0.38268343f, 0.92387953f}};
+    int in_tilted = 0;
+    for (int s = 0; s < sl_count(w); s++) {
+        sl_vec3 p = sl_positions(w)[s], q = {p.x, p.y + 0.6f, p.z};
+        float c = 0.92387953f * 0.92387953f - 0.38268343f * 0.38268343f, si = 2 * 0.38268343f * 0.92387953f;   /* rotation by -45 degrees about z */
+        sl_vec3 l = {c * q.x + si * q.y, -si * q.x + c * q.y, q.z};
+        in_tilted += fabsf(l.x) <= 0.6f && fabsf(l.y) <= 0.05f && fabsf(l.z) <= 0.6f;
+    }
+    CHECK(sl_query(w, &tilted, 0, NULL, 0, NULL) == in_tilted, "rotated box found %d, expected %d", sl_query(w, &tilted, 0, NULL, 0, NULL), in_tilted);
+
+    /* Ids come in slot order, up to cap, and the full count is still returned. */
+    sl_particle got[16], want[16];
+    n = sl_query(w, &all, 1u << snd, got, 16, NULL);
+    count_where(w, 1u << snd, everywhere, NULL, &ref_mass, want, 16);
+    CHECK(n == grains && memcmp(got, want, sizeof got) == 0, "ids differ from slot order");
+
+    sl_collider_desc bad = {.shape = SL_SPHERE, .radius = -1};
+    CHECK(sl_query(w, &bad, 0, got, 16, &r) == 0 && r.count == 0, "invalid shape was queried");
+    CHECK(sl_query(w, NULL, 0, NULL, 0, NULL) == 0, "null shape was queried");
+    sl_world_destroy(w);
+}
+
+/* ---------- custom shapes ---------- */
+
+/* A rope along an L-shaped path keeps its length and starts and ends where the path does. */
+static void test_rope_path(void) {
+    sl_world *w = make_world(1000);
+    sl_material m = solid(w);
+    sl_vec3 path[3] = {{-0.6f, 1.5f, 0}, {0.4f, 1.5f, 0}, {0.4f, 1.5f, 0.8f}};
+    sl_object rope = sl_rope_create_path(w, m, path, 3, 0);
+    const sl_particle *ids;
+    int n = sl_object_particles(w, rope, &ids);
+    CHECK(n >= 18 && n <= 20, "a 1.8 m rope got %d particles", n);
+    CHECK(dist(sl_position(w, ids[0]), path[0]) < 1e-5f && dist(sl_position(w, ids[n - 1]), path[2]) < 1e-5f, "rope does not span the path");
+    int on_corner = 0;
+    for (int i = 0; i < n; i++) on_corner |= dist(sl_position(w, ids[i]), path[1]) < 0.06f;
+    CHECK(on_corner, "rope cut the corner");
+    sl_pin(w, ids[0], 1);
+    sl_pin(w, ids[n - 1], 1);
+    steps(w, 240);
+    float len = 0;
+    for (int i = 0; i + 1 < n; i++) len += dist(sl_position(w, ids[i]), sl_position(w, ids[i + 1]));
+    CHECK(fabsf(len / 1.8f - 1) < 0.02f, "rope length %f, path is 1.8", len);
+    sl_vec3 bad[2] = {{0, 0, 0}, {NAN, 0, 0}};
+    CHECK(sl_rope_create_path(w, m, path, 1, 0) == -1 && sl_rope_create_path(w, m, bad, 2, 0) == -1
+          && sl_rope_create_path(w, m, NULL, 3, 0) == -1, "invalid paths accepted");
+    sl_world_destroy(w);
+}
+
+/* Lattice points inside a ball of the given radius, spaced like particles. */
+static int ball_points(sl_vec3 *out, float radius, sl_vec3 c) {
+    int n = 0, k = (int)(radius / (2 * R)) + 1;
+    for (int z = -k; z <= k; z++)
+        for (int y = -k; y <= k; y++)
+            for (int x = -k; x <= k; x++) {
+                sl_vec3 p = {c.x + 2 * R * (float)x, c.y + 2 * R * (float)y, c.z + 2 * R * (float)z};
+                if (dist(p, c) <= radius) out[n++] = p;
+            }
+    return n;
+}
+
+/* A soft body from points: a stiff ball keeps its shape when dropped, and a soft one squashes and recovers. */
+static void test_softbody_points(void) {
+    static sl_vec3 pts[4096];
+    float heights[2];
+    float stiffness[2] = {1.0f, 0.05f};
+    for (int k = 0; k < 2; k++) {
+        sl_world *w = make_world(4000);
+        add_floor(w, 0.8f);
+        int n = ball_points(pts, 0.4f, (sl_vec3){0, 1.0f, 0});   /* 9 cells across, so clusters overlap */
+        float lo0 = 1e9f, hi0 = -1e9f;   /* extent of the particle centers, not the ball's surface */
+        for (int i = 0; i < n; i++) { lo0 = fminf(lo0, pts[i].y); hi0 = fmaxf(hi0, pts[i].y); }
+        sl_object ball = sl_softbody_create(w, solid(w), pts, n, stiffness[k], 0);
+        CHECK(sl_object_particles(w, ball, NULL) == n, "ball has %d of %d particles", sl_object_particles(w, ball, NULL), n);
+        steps(w, 240);
+        const sl_particle *ids;
+        sl_object_particles(w, ball, &ids);
+        float lo = 1e9f, hi = -1e9f;
+        for (int i = 0; i < n; i++) { float y = sl_position(w, ids[i]).y; lo = fminf(lo, y); hi = fmaxf(hi, y); }
+        heights[k] = (hi - lo) / (hi0 - lo0);
+        sl_world_destroy(w);
+    }
+    /* A lattice ball rests on a single pole particle, which the floor pushes in a little; the body keeps its shape. */
+    CHECK(heights[0] > 0.85f, "stiff ball height ratio %f", heights[0]);
+    CHECK(heights[1] > 0.6f, "soft ball fell apart: height ratio %f", heights[1]);
+
+    /* A long bar from points holds together like the box version: kicking one end drags its neighbor. */
+    for (int i = 0; i < 125; i++) pts[i] = (sl_vec3){2 * R * (float)i, 0, 0};
+    sl_world_desc d = {0};
+    d.max_particles = 1000;
+    d.particle_radius = R;
+    d.sleep_speed = -1;
+    sl_world *w = sl_world_create(&d);
+    sl_object bar = sl_softbody_create(w, solid(w), pts, 125, 1.0f, 0);
+    const sl_particle *ids;
+    sl_object_particles(w, bar, &ids);
+    float before = sl_position(w, ids[1]).y;
+    sl_set_velocity(w, ids[0], (sl_vec3){0, 4, 0});
+    steps(w, 15);
+    CHECK(sl_position(w, ids[1]).y - before > 0.02f, "a bar made of points has no shape matching");
+    sl_vec3 bad = {NAN, 0, 0};
+    CHECK(sl_softbody_create(w, solid(w), &bad, 1, 1, 0) == -1 && sl_softbody_create(w, solid(w), pts, 0, 1, 0) == -1,
+          "invalid soft bodies accepted");
+    sl_world_destroy(w);
+}
+
+/* ---------- moving colliders ---------- */
+
+/* A thin wall moving 0.5 m per substep sweeps past a particle resting between two of its substep positions; it
+   must catch the particle and carry it, not jump over it. The same for a fast ball. */
+static void test_fast_collider(void) {
+    for (int shape = 0; shape < 2; shape++) {
+        sl_world_desc d = {0};
+        d.max_particles = 10;
+        d.particle_radius = R;
+        d.sleep_speed = -1;
+        sl_world *w = sl_world_create(&d);
+        sl_collider_desc c = {.position = {-1, 0, 0}};
+        if (shape == 0) { c.shape = SL_BOX; c.half_extents = (sl_vec3){0.01f, 1, 1}; }
+        else { c.shape = SL_SPHERE; c.radius = 0.1f; }
+        sl_collider wall = sl_collider_add(w, &c);
+        sl_particle p = sl_spawn(w, sand(w), (sl_vec3){0.2f, 0, 0}, (sl_vec3){0, 0, 0});
+        sl_step(w, DT);
+        sl_collider_move(w, wall, (sl_vec3){1, 0, 0}, NULL);   /* one step, four substeps of 0.5 m */
+        sl_step(w, DT);
+        CHECK(sl_position(w, p).x > 0.9f, "%s jumped over the particle: it is at x=%f", shape ? "ball" : "wall", sl_position(w, p).x);
+        sl_world_destroy(w);
+    }
+}
+
 typedef struct { const char *name; void (*fn)(void); } test;
 
 int main(int argc, char **argv) {
@@ -1770,6 +2072,14 @@ int main(int argc, char **argv) {
         {"snapshot ellipsoids", test_snapshot_ellipsoids},
         {"deterministic build", test_deterministic_build},
         {"golden hash", test_golden_hash},
+        {"set gravity", test_set_gravity},
+        {"material set", test_material_set},
+        {"collider set", test_collider_set},
+        {"remove many", test_remove_many},
+        {"query", test_query},
+        {"rope path", test_rope_path},
+        {"soft body from points", test_softbody_points},
+        {"fast collider", test_fast_collider},
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
         {"idle workers block", test_idle_workers_block},
 #endif
