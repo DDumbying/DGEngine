@@ -1895,6 +1895,90 @@ static void test_query(void) {
     sl_world_destroy(w);
 }
 
+/* ---------- custom shapes ---------- */
+
+/* A rope along an L-shaped path keeps its length and starts and ends where the path does. */
+static void test_rope_path(void) {
+    sl_world *w = make_world(1000);
+    sl_material m = solid(w);
+    sl_vec3 path[3] = {{-0.6f, 1.5f, 0}, {0.4f, 1.5f, 0}, {0.4f, 1.5f, 0.8f}};
+    sl_object rope = sl_rope_create_path(w, m, path, 3, 0);
+    const sl_particle *ids;
+    int n = sl_object_particles(w, rope, &ids);
+    CHECK(n >= 18 && n <= 20, "a 1.8 m rope got %d particles", n);
+    CHECK(dist(sl_position(w, ids[0]), path[0]) < 1e-5f && dist(sl_position(w, ids[n - 1]), path[2]) < 1e-5f, "rope does not span the path");
+    int on_corner = 0;
+    for (int i = 0; i < n; i++) on_corner |= dist(sl_position(w, ids[i]), path[1]) < 0.06f;
+    CHECK(on_corner, "rope cut the corner");
+    sl_pin(w, ids[0], 1);
+    sl_pin(w, ids[n - 1], 1);
+    steps(w, 240);
+    float len = 0;
+    for (int i = 0; i + 1 < n; i++) len += dist(sl_position(w, ids[i]), sl_position(w, ids[i + 1]));
+    CHECK(fabsf(len / 1.8f - 1) < 0.02f, "rope length %f, path is 1.8", len);
+    sl_vec3 bad[2] = {{0, 0, 0}, {NAN, 0, 0}};
+    CHECK(sl_rope_create_path(w, m, path, 1, 0) == -1 && sl_rope_create_path(w, m, bad, 2, 0) == -1
+          && sl_rope_create_path(w, m, NULL, 3, 0) == -1, "invalid paths accepted");
+    sl_world_destroy(w);
+}
+
+/* Lattice points inside a ball of the given radius, spaced like particles. */
+static int ball_points(sl_vec3 *out, float radius, sl_vec3 c) {
+    int n = 0, k = (int)(radius / (2 * R)) + 1;
+    for (int z = -k; z <= k; z++)
+        for (int y = -k; y <= k; y++)
+            for (int x = -k; x <= k; x++) {
+                sl_vec3 p = {c.x + 2 * R * (float)x, c.y + 2 * R * (float)y, c.z + 2 * R * (float)z};
+                if (dist(p, c) <= radius) out[n++] = p;
+            }
+    return n;
+}
+
+/* A soft body from points: a stiff ball keeps its shape when dropped, and a soft one squashes and recovers. */
+static void test_softbody_points(void) {
+    static sl_vec3 pts[4096];
+    float heights[2];
+    float stiffness[2] = {1.0f, 0.05f};
+    for (int k = 0; k < 2; k++) {
+        sl_world *w = make_world(4000);
+        add_floor(w, 0.8f);
+        int n = ball_points(pts, 0.4f, (sl_vec3){0, 1.0f, 0});   /* 9 cells across, so clusters overlap */
+        float lo0 = 1e9f, hi0 = -1e9f;   /* extent of the particle centers, not the ball's surface */
+        for (int i = 0; i < n; i++) { lo0 = fminf(lo0, pts[i].y); hi0 = fmaxf(hi0, pts[i].y); }
+        sl_object ball = sl_softbody_create(w, solid(w), pts, n, stiffness[k], 0);
+        CHECK(sl_object_particles(w, ball, NULL) == n, "ball has %d of %d particles", sl_object_particles(w, ball, NULL), n);
+        steps(w, 240);
+        const sl_particle *ids;
+        sl_object_particles(w, ball, &ids);
+        float lo = 1e9f, hi = -1e9f;
+        for (int i = 0; i < n; i++) { float y = sl_position(w, ids[i]).y; lo = fminf(lo, y); hi = fmaxf(hi, y); }
+        heights[k] = (hi - lo) / (hi0 - lo0);
+        sl_world_destroy(w);
+    }
+    /* A lattice ball rests on a single pole particle, which the floor pushes in a little; the body keeps its shape. */
+    CHECK(heights[0] > 0.85f, "stiff ball height ratio %f", heights[0]);
+    CHECK(heights[1] > 0.6f, "soft ball fell apart: height ratio %f", heights[1]);
+
+    /* A long bar from points holds together like the box version: kicking one end drags its neighbor. */
+    for (int i = 0; i < 125; i++) pts[i] = (sl_vec3){2 * R * (float)i, 0, 0};
+    sl_world_desc d = {0};
+    d.max_particles = 1000;
+    d.particle_radius = R;
+    d.sleep_speed = -1;
+    sl_world *w = sl_world_create(&d);
+    sl_object bar = sl_softbody_create(w, solid(w), pts, 125, 1.0f, 0);
+    const sl_particle *ids;
+    sl_object_particles(w, bar, &ids);
+    float before = sl_position(w, ids[1]).y;
+    sl_set_velocity(w, ids[0], (sl_vec3){0, 4, 0});
+    steps(w, 15);
+    CHECK(sl_position(w, ids[1]).y - before > 0.02f, "a bar made of points has no shape matching");
+    sl_vec3 bad = {NAN, 0, 0};
+    CHECK(sl_softbody_create(w, solid(w), &bad, 1, 1, 0) == -1 && sl_softbody_create(w, solid(w), pts, 0, 1, 0) == -1,
+          "invalid soft bodies accepted");
+    sl_world_destroy(w);
+}
+
 typedef struct { const char *name; void (*fn)(void); } test;
 
 int main(int argc, char **argv) {
@@ -1966,6 +2050,8 @@ int main(int argc, char **argv) {
         {"collider set", test_collider_set},
         {"remove many", test_remove_many},
         {"query", test_query},
+        {"rope path", test_rope_path},
+        {"soft body from points", test_softbody_points},
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
         {"idle workers block", test_idle_workers_block},
 #endif

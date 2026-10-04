@@ -174,6 +174,12 @@ SL_API sl_object sl_cloth_create(sl_world *w, sl_material m, sl_vec3 origin, sl_
 /* stiffness 0..1 pulls back to shape, plasticity 0..1 keeps dents. */
 SL_API sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max,
                                  float stiffness, float plasticity);
+/* A rope along a polyline of count >= 2 points, resampled at particle spacing. */
+SL_API sl_object sl_rope_create_path(sl_world *w, sl_material m, const sl_vec3 *points, int count, float compliance);
+/* A soft body of any shape, one particle per point; space the points about 2 * radius apart, for example a mesh
+   sampled on a lattice. Clusters work as for the box version, so stiffness and plasticity mean the same. */
+SL_API sl_object sl_softbody_create(sl_world *w, sl_material m, const sl_vec3 *points, int count,
+                                    float stiffness, float plasticity);
 SL_API void sl_object_destroy(sl_world *w, sl_object o);
 /* Particle ids of the object in creation order (rope from a to b, cloth row by row). */
 SL_API int sl_object_particles(const sl_world *w, sl_object o, const sl_particle **ids);
