@@ -1982,6 +1982,30 @@ static void test_softbody_points(void) {
     sl_world_destroy(w);
 }
 
+/* ---------- moving colliders ---------- */
+
+/* A thin wall moving 0.5 m per substep sweeps past a particle resting between two of its substep positions; it
+   must catch the particle and carry it, not jump over it. The same for a fast ball. */
+static void test_fast_collider(void) {
+    for (int shape = 0; shape < 2; shape++) {
+        sl_world_desc d = {0};
+        d.max_particles = 10;
+        d.particle_radius = R;
+        d.sleep_speed = -1;
+        sl_world *w = sl_world_create(&d);
+        sl_collider_desc c = {.position = {-1, 0, 0}};
+        if (shape == 0) { c.shape = SL_BOX; c.half_extents = (sl_vec3){0.01f, 1, 1}; }
+        else { c.shape = SL_SPHERE; c.radius = 0.1f; }
+        sl_collider wall = sl_collider_add(w, &c);
+        sl_particle p = sl_spawn(w, sand(w), (sl_vec3){0.2f, 0, 0}, (sl_vec3){0, 0, 0});
+        sl_step(w, DT);
+        sl_collider_move(w, wall, (sl_vec3){1, 0, 0}, NULL);   /* one step, four substeps of 0.5 m */
+        sl_step(w, DT);
+        CHECK(sl_position(w, p).x > 0.9f, "%s jumped over the particle: it is at x=%f", shape ? "ball" : "wall", sl_position(w, p).x);
+        sl_world_destroy(w);
+    }
+}
+
 typedef struct { const char *name; void (*fn)(void); } test;
 
 int main(int argc, char **argv) {
@@ -2055,6 +2079,7 @@ int main(int argc, char **argv) {
         {"query", test_query},
         {"rope path", test_rope_path},
         {"soft body from points", test_softbody_points},
+        {"fast collider", test_fast_collider},
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
         {"idle workers block", test_idle_workers_block},
 #endif
