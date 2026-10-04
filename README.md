@@ -6,6 +6,11 @@ soft, squishy bodies that wobble and dent. Everything is made of particles in on
 position based dynamics with many small substeps, the same family of methods used by NVIDIA FleX
 and Obi.
 
+It is deterministic: every machine computes the same bits, on x86-64 and ARM64, Linux, macOS,
+Windows and WebAssembly, for any number of threads. Together with snapshots that restore exactly,
+that makes water and sand something multiplayer games can play with, in lockstep or with rollback,
+instead of an effect each client draws its own way.
+
 ![sandbox](docs/sandbox.png)
 
 | | |
@@ -16,14 +21,16 @@ and Obi.
 ## Why
 
 Unified particle physics is a great fit for games, but the options are thin: FleX is no longer
-maintained and tied to NVIDIA hardware, and Obi is paid and Unity-only. slime aims to be the free,
-portable, engine-agnostic option:
+maintained and tied to NVIDIA hardware, PhysX's particles need an NVIDIA GPU, and Obi is paid and
+Unity-only. None of them promise determinism, and game servers have no GPU. slime aims to be the
+free, portable, engine-agnostic option that you can network:
 
 - Plain C11, one public header, no dependencies besides libm and threads.
 - No window, renderer or global state. You step it and read positions back.
 - Fast: multithreaded, and calm scenes go to sleep and cost almost nothing.
 - Lean: memory grows with what you use, you control it through an allocator hook.
-- Deterministic: same input, same result, bit for bit, for any number of threads.
+- Deterministic: same input, same result, bit for bit, on every supported platform and thread count.
+- Snapshots: save and restore the whole state exactly, for rollback, replays, late join and saves.
 - MIT licensed.
 
 ## Features
@@ -42,6 +49,8 @@ portable, engine-agnostic option:
 | Spray and foam | Diffuse particles thrown off by fast water: spray, foam riding the surface, rising bubbles |
 | Stable ids | Particle handles stay valid while memory is reordered for speed |
 | Sleeping | Calm islands of particles stop simulating until something touches them |
+| Determinism | Same bits on x86-64, ARM64 and WebAssembly with GCC, Clang and MSVC; checked in CI |
+| Snapshots | Compact, portable, restore bit-exactly; a state hash per step catches desyncs |
 | Threads | Built-in pool, or plug in your own job system |
 | Robustness | Swept tests stop tunneling, overlaps are removed without launching particles, bad values are caught |
 
@@ -97,12 +106,29 @@ ctest --test-dir build --output-on-failure   # headless tests
 To see where the time goes, build with `-DSLIME_PROFILE=ON` and run `slime_bench --phases`; it prints the
 cost of each solver phase on 1 and 4 threads.
 
-To use it in your own CMake project:
+To use it in your own CMake project, either add the source tree (slime's tests are then left out of your
+build):
 
 ```cmake
 add_subdirectory(slime)
-target_link_libraries(your_game PRIVATE slime)
+target_link_libraries(your_game PRIVATE slime::slime)
 ```
+
+or install it and find the package:
+
+```sh
+cmake -B build -DSLIME_BUILD_TESTS=OFF        # add -DBUILD_SHARED_LIBS=ON for a shared library
+cmake --build build
+cmake --install build --prefix /where/it/goes
+```
+
+```cmake
+find_package(slime 0.6 REQUIRED)
+target_link_libraries(your_game PRIVATE slime::slime)
+```
+
+Without CMake, `pkg-config --cflags --libs slime` gives the flags. A shared build exports only the `sl_`
+functions. `sl_version()` returns the version the library was built as, to check against the header.
 
 ### Demo
 
@@ -133,6 +159,43 @@ cmake --build build-demo
 | Right drag, middle drag, wheel | Orbit, pan, zoom |
 | `Shift` + wheel, `[` `]` | Brush size |
 | `F1` to `F4`, `F5` | Example scenes, back to the empty sandbox |
+
+## Multiplayer: lockstep and rollback
+
+Everything that shapes the result depends only on the state and the calls you make, so two machines
+that start from the same state and apply the same calls in the same order stay identical. Compare a
+hash once in a while to catch a desync early:
+
+```c
+uint64_t mine = sl_state_hash(world);   /* send it with your inputs, compare with the other side's */
+```
+
+Rollback keeps snapshots and restores one when a late input arrives, then replays:
+
+```c
+size_t size = sl_snapshot_size(world);
+void *snap = malloc(size);
+sl_snapshot_save(world, snap, size);        /* every frame, into a ring buffer */
+/* ... a late input for an older frame arrives ... */
+sl_snapshot_load(world, snap, size);        /* back to that frame, bit for bit */
+/* apply the corrected inputs and step forward again */
+```
+
+A player who joins late loads the host's snapshot into a world created with the same settings and
+continues in step with everyone. Snapshots are little-endian and portable between platforms, hold
+the gameplay state only (spray clears, surface ellipsoids are rebuilt) and keep every particle,
+object and collider handle valid. They load with the same slime version and world settings; a
+mismatch or a damaged buffer is reported and leaves the world untouched, so snapshots from the
+network are safe to try. Saving takes about 60 bytes per particle and a fraction of a step.
+
+What determinism needs from you:
+
+- Build slime with its CMake (it passes `-ffp-contract=off`, or `/fp:precise` on MSVC). The sources
+  refuse `-ffast-math` and x87 math. `sl_deterministic()` returns 1 when the build computes floats
+  exactly like the reference.
+- Make the same calls with the same values in the same order everywhere. Values you compute from
+  your own game state must themselves be deterministic.
+- Your engine may use flush-to-zero; slime sets its own float mode while it works and restores yours.
 
 ## Using slime with a rigid-body engine
 
@@ -186,7 +249,7 @@ third between runs, so compare numbers from the same run.
 | Water pool with ellipsoids and spray | 8,400 | 4 | 21.0 | 12.2 |
 
 Calm scenes sleep and cost almost nothing. In the larger sand scenes water is still seeping
-through the sand after 26 seconds, so they are still awake. Memory is about 750 to 950 bytes per
+through the sand after 26 seconds, so they are still awake. Memory is about 850 to 1100 bytes per
 particle, a little more with surface ellipsoids, including headroom for the busiest moment. The
 violent case is still slower than the goal of 10k particles under 8 ms on 4 cores; fast water
 moves past the neighbor margin every substep, so the neighbor rebuild and the fluid pressure
@@ -195,8 +258,9 @@ passes are what is left to make cheaper.
 ## Notes
 
 - Units are meters, kilograms and seconds. Particles sit `2 * particle_radius` apart at rest.
-- Results are identical for any worker count on the same build. Bit-identical results across
-  different compilers or platforms are not promised yet.
+- Results are bit-identical for any worker count and across x86-64, ARM64 and WebAssembly, with GCC,
+  Clang and MSVC, as long as slime is built with its own settings; CI checks a fixed scene's hash on
+  every platform. 32-bit x86 needs SSE2 math. Determinism assumes allocations succeed.
 - Grains heavier than water sink but come to rest on a thin cushion of water about two particles
   above the floor, because the particle fluid is very slightly compressible with depth.
 - Sand is porous: water seeps through a pile, so a soaked pile keeps slowly settling for a while

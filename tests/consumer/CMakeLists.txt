@@ -1,0 +1,16 @@
+# Builds tests/consumer/main.c against an installed slime (find_package), or against the source tree when
+# SLIME_SOURCE_DIR is given (add_subdirectory), and fails if slime's own tests leak into the game's build.
+cmake_minimum_required(VERSION 3.16)
+project(slime_consumer C)
+if(SLIME_SOURCE_DIR)
+    add_subdirectory(${SLIME_SOURCE_DIR} slime)
+    if(TARGET slime_tests OR TARGET slime_bench)
+        message(FATAL_ERROR "slime built its tests inside a game's project")
+    endif()
+else()
+    find_package(slime 0.6 REQUIRED)
+endif()
+add_executable(consumer main.c)
+target_link_libraries(consumer PRIVATE slime::slime)
+enable_testing()
+add_test(NAME consumer COMMAND consumer)

@@ -47,8 +47,8 @@ static void chunk_bounds(sl_world *w, int begin, int end, int chunk, void *ctx) 
     sl_vec3 lo = w->x[begin], hi = w->x[begin], sum = w->x[begin];
     for (int s = begin + 1; s < end; s++) {
         sl_vec3 x = w->x[s];
-        lo = v3(fminf(lo.x, x.x), fminf(lo.y, x.y), fminf(lo.z, x.z));
-        hi = v3(fmaxf(hi.x, x.x), fmaxf(hi.y, x.y), fmaxf(hi.z, x.z));
+        lo = v3(sl_min(lo.x, x.x), sl_min(lo.y, x.y), sl_min(lo.z, x.z));
+        hi = v3(sl_max(hi.x, x.x), sl_max(hi.y, x.y), sl_max(hi.z, x.z));
         sum = v3_add(sum, x);
     }
     w->tmp[3 * chunk] = lo;
@@ -73,8 +73,7 @@ static void fit_cells(double n[3], double budget) {
         for (int j = i + 1; j < 3; j++)
             if (n[order[j]] < n[order[i]]) { int t = order[i]; order[i] = order[j]; order[j] = t; }
     for (int k = 0; k < 3; k++) {
-        double limit = floor(pow(budget, 1.0 / (3 - k)));
-        if (limit < 1) limit = 1;
+        double limit = sl_iroot(budget, 3 - k);
         if (n[order[k]] > limit) n[order[k]] = limit;
         budget /= n[order[k]];
     }
@@ -91,8 +90,8 @@ static int setup_grid(sl_world *w) {
     sl_vec3 lo = w->tmp[0], hi = w->tmp[1], sum = w->tmp[2];
     for (int c = 1; c < chunks; c++) {
         sl_vec3 a = w->tmp[3 * c], b = w->tmp[3 * c + 1];
-        lo = v3(fminf(lo.x, a.x), fminf(lo.y, a.y), fminf(lo.z, a.z));
-        hi = v3(fmaxf(hi.x, b.x), fmaxf(hi.y, b.y), fmaxf(hi.z, b.z));
+        lo = v3(sl_min(lo.x, a.x), sl_min(lo.y, a.y), sl_min(lo.z, a.z));
+        hi = v3(sl_max(hi.x, b.x), sl_max(hi.y, b.y), sl_max(hi.z, b.z));
         sum = v3_add(sum, w->tmp[3 * c + 2]);
     }
     /* Dense cells are half the search range and scanned 5 wide, which tests far fewer far-off particles. */
@@ -108,7 +107,7 @@ static int setup_grid(sl_world *w) {
         const float *m = &mean.x, *l = &lo.x, *h = &hi.x;
         for (int a = 0; a < 3; a++) {
             float width = (float)n[a] * cell;
-            o[a] = fmaxf(l[a], fminf(m[a] - 0.5f * width, h[a] - width));
+            o[a] = sl_max(l[a], sl_min(m[a] - 0.5f * width, h[a] - width));
         }
         sl_vec3 box[2] = {origin, v3(origin.x + (float)n[0] * cell, origin.y + (float)n[1] * cell, origin.z + (float)n[2] * cell)};
         sl__parallel(w, w->count, count_outside, box);
@@ -124,7 +123,12 @@ static int setup_grid(sl_world *w) {
         g->nx = (int)n[0]; g->ny = (int)n[1]; g->nz = (int)n[2];
         g->cells = g->nx * g->ny * g->nz;
     } else {
-        g->cells = g->table_size;
+        /* Sized from the particle count, never from buffer capacities, which differ between machines that
+           reached the same state by different routes; bucket order shapes neighbor order and so results. */
+        int table = 1024;
+        while (table < (1 << 30) && table < 2LL * w->count) table <<= 1;
+        g->table_size = table;
+        g->cells = table;
     }
     return sl__grow(w, (void **)&g->start, &g->start_cap, g->cells + 1, sizeof(int));
 }
@@ -188,14 +192,22 @@ static void reorder(sl_world *w) {
     for (int k = 0; k < n; k++) g->sorted[k] = k;
 }
 
-/* Every particle within range of slot s, from the cells around it, written to out up to room.
-   Positions are read from xs, a copy in cell order, so each row of cells is one sequential run.
-   Returns the full count either way. */
-static int scan_cells(const sl_world *w, const sl_vec3 *xs, int s, int *out, int room, float range2) {
+#define SL_FAR_MAX 256
+
+/* Every particle within range of slot s, from the cells around it, written to out up to room; returns the full
+   count either way. Positions are read from xs, a copy in cell order, so each row of cells is one sequential
+   run. With far set, neighbors closer than near2 come first and the rest are collected in far and appended,
+   so passes that skip far neighbors branch predictably; it returns -1 if far fills up. */
+static int scan_cells_split(const sl_world *w, const sl_vec3 *xs, int s, int *out, int room, float range2, float near2, int *far) {
     const grid *g = &w->g;
     sl_vec3 x = w->x[s];
-    int n = 0;
-#define TRY(t) do { if (v3_len2(v3_sub(xs[t], x)) < range2) { int c_ = g->sorted[t]; if (c_ != s) { if (n < room) out[n] = c_; n++; } } } while (0)
+    int n = 0, nf = 0;
+#define TRY(t) do { float d2_ = v3_len2(v3_sub(xs[t], x)); \
+        if (d2_ < range2) { int c_ = g->sorted[t]; \
+            if (c_ != s) { \
+                if (!far || d2_ < near2) { if (n < room) out[n] = c_; n++; } \
+                else if (nf < SL_FAR_MAX) far[nf++] = c_; \
+                else return -1; } } } while (0)
     if (g->dense) {
         int ix = dense_coord(x.x, g->origin.x, g->cell, g->nx), iy = dense_coord(x.y, g->origin.y, g->cell, g->ny);
         int iz = dense_coord(x.z, g->origin.z, g->cell, g->nz);
@@ -206,13 +218,22 @@ static int scan_cells(const sl_world *w, const sl_vec3 *xs, int s, int *out, int
                 int row = g->nx * (y + g->ny * z);
                 for (int t = g->start[row + x0]; t < g->start[row + x1 + 1]; t++) TRY(t);
             }
-        return n;
+    } else {
+        int buckets[27], nb = hash_buckets(g, x, buckets);
+        for (int b = 0; b < nb; b++)
+            for (int t = g->start[buckets[b]]; t < g->start[buckets[b] + 1]; t++) TRY(t);
     }
-    int buckets[27], nb = hash_buckets(g, x, buckets);
-    for (int b = 0; b < nb; b++)
-        for (int t = g->start[buckets[b]]; t < g->start[buckets[b] + 1]; t++) TRY(t);
 #undef TRY
+    for (int k = 0; k < nf; k++) { if (n < room) out[n] = far[k]; n++; }
     return n;
+}
+
+/* Near neighbors first, or in plain scan order for the rare particle with more far neighbors than fit. Either
+   way the list depends only on the positions it was built from. */
+static int scan_cells(const sl_world *w, const sl_vec3 *xs, int s, int *out, int room, float range2) {
+    int far[SL_FAR_MAX];
+    int n = scan_cells_split(w, xs, s, out, room, range2, w->h * w->h, far);
+    return n >= 0 ? n : scan_cells_split(w, xs, s, out, room, range2, 0, NULL);
 }
 
 static void copy_sorted(sl_world *w, int begin, int end, int chunk, void *ctx) {
@@ -225,7 +246,7 @@ typedef struct { float range2; int room; } list_ctx;
 /* Each chunk of slots writes its lists into its own slice of the scratch buffer and keeps the counts. */
 static void find_lists(sl_world *w, int begin, int end, int chunk, void *ctx) {
     list_ctx *c = ctx;
-    int *out = (int *)(void *)w->nbr_r + (size_t)chunk * (size_t)c->room, n = 0;
+    int *out = w->knbr + (size_t)chunk * (size_t)c->room, n = 0;
     for (int s = begin; s < end; s++) {
         int k = scan_cells(w, w->tmp, s, out + (n < c->room ? n : c->room), c->room - n, c->range2);
         w->order[s] = k;
@@ -236,7 +257,7 @@ static void find_lists(sl_world *w, int begin, int end, int chunk, void *ctx) {
 
 /* Copies each chunk's slice to its final place and fills the offsets. */
 static void place_lists(sl_world *w, int begin, int end, int chunk, void *ctx) {
-    const int *slice = (const int *)(void *)w->nbr_r + (size_t)chunk * (size_t)*(int *)ctx;
+    const int *slice = w->knbr + (size_t)chunk * (size_t)*(int *)ctx;
     int at = w->chunk_buf[chunk], count = w->chunk_buf[chunk + 1] - at;
     if (count) memcpy(w->nbr + at, slice, (size_t)count * sizeof(int));
     for (int s = begin; s < end; s++) { w->nbr_off[s] = at; at += w->order[s]; }
@@ -249,7 +270,7 @@ static int build_lists(sl_world *w, float range2) {
     if (!sl__grow(w, (void **)&w->chunk_buf, &w->chunk_cap, chunks + 1, sizeof(int))) return 0;
     sl__parallel(w, n, copy_sorted, NULL);
     for (;;) {
-        if (!sl__grow(w, (void **)&w->nbr_r, &w->nbr_r_cap, chunks * w->chunk_room, sizeof(float))) return 0;
+        if (!sl__grow(w, (void **)&w->knbr, &w->knbr_cap, chunks * w->chunk_room, sizeof(int))) return 0;
         list_ctx lc = {range2, w->chunk_room};
         sl__parallel(w, n, find_lists, &lc);
         int most = 0;
@@ -260,7 +281,8 @@ static int build_lists(sl_world *w, float range2) {
     int total = 0;
     for (int c = 0; c < chunks; c++) { int k = w->chunk_buf[c]; w->chunk_buf[c] = total; total += k; }
     w->chunk_buf[chunks] = total;
-    if (!sl__grow(w, (void **)&w->nbr, &w->nbr_cap, total, sizeof(int))) return 0;
+    if (!sl__grow(w, (void **)&w->nbr, &w->nbr_cap, total, sizeof(int))
+        || !sl__grow(w, (void **)&w->kdist, &w->kdist_cap, total, sizeof(float))) return 0;
     sl__parallel(w, n, place_lists, &w->chunk_room);
     w->nbr_off[n] = total;
     w->pair_count = total / 2;
@@ -282,7 +304,7 @@ typedef struct { float reach2, shock; sl_vec3 up; int fill; } contact_ctx;
    chunk's offset, so the order never depends on threads. */
 static void contact_range(sl_world *w, int begin, int end, int chunk, void *ctx) {
     contact_ctx *c = ctx;
-    contact *out = w->contact_tmp + (c->fill ? w->chunk_buf[chunk] : 0);
+    contact *out = c->fill ? w->contact_tmp + w->chunk_buf[chunk] : NULL;   /* no buffer while counting */
     int count = 0;
     for (int i = begin; i < end; i++)
         for (int k = w->nbr_off[i]; k < w->nbr_off[i + 1]; k++) {
@@ -291,7 +313,7 @@ static void contact_range(sl_world *w, int begin, int end, int chunk, void *ctx)
             if (!c->fill) { count++; continue; }
             /* Shock propagation: the upper particle acts lighter, so piles carry their weight down.
                Only between solids; fluid below a grain must not act as a floor. */
-            float h = fminf(fmaxf(v3_dot(v3_sub(w->x[i], w->x[j]), c->up), -w->spacing), w->spacing);
+            float h = sl_min(sl_max(v3_dot(v3_sub(w->x[i], w->x[j]), c->up), -w->spacing), w->spacing);
             const sl_material_desc *mi = &w->materials[w->mat[i]], *mj = &w->materials[w->mat[j]];
             float mu = 0.5f * (mi->friction + mj->friction), dist = w->spacing;
             if (w->obj[i] >= 0 && w->obj[i] == w->obj[j]) {
@@ -301,22 +323,23 @@ static void contact_range(sl_world *w, int begin, int end, int chunk, void *ctx)
             /* Fluid against solids: no friction, and a little closer, so water can flow between grains. */
             int wet = (w->flags[i] | w->flags[j]) & F_FLUID;
             if (wet) { mu = 0; dist = 0.8f * w->spacing; }
-            *out++ = (contact){i, j, wet ? 1.0f : expf(c->shock * h), mu, dist, 0.5f * (mi->wet_cohesion + mj->wet_cohesion) / 255.0f};
+            *out++ = (contact){i, j, wet ? 1.0f : sl_exp2(h * c->shock), mu, dist, 0.5f * (mi->wet_cohesion + mj->wet_cohesion) / 255.0f};
         }
     if (!c->fill) w->chunk_buf[chunk] = count;
 }
 
 static int collect_contacts(sl_world *w) {
     float reach = w->spacing + w->skin, glen = v3_len(w->gravity);
-    contact_ctx c = {reach * reach, 0.6931f / w->spacing, glen > 0 ? v3_scale(w->gravity, -1.0f / glen) : v3(0, 0, 0), 0};
+    contact_ctx c = {reach * reach, 1.0f / w->spacing, glen > 0 ? v3_scale(w->gravity, -1.0f / glen) : v3(0, 0, 0), 0};
     int chunks = sl__chunks(w->count), n = 0;
     sl__parallel(w, w->count, contact_range, &c);
     for (int k = 0; k < chunks; k++) { int count = w->chunk_buf[k]; w->chunk_buf[k] = n; n += count; }
     if (!sl__grow(w, (void **)&w->contact_tmp, &w->contact_tmp_cap, n, sizeof(contact))
         || !sl__grow(w, (void **)&w->contacts, &w->contact_cap, n, sizeof(contact))) return 0;
+    w->contact_count = n;
+    if (!n) return 1;   /* nothing to fill, and the buffers may not exist yet */
     c.fill = 1;
     sl__parallel(w, w->count, contact_range, &c);
-    w->contact_count = n;
     return 1;
 }
 

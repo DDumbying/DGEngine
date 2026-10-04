@@ -57,7 +57,7 @@ static int slot_arrays(sl_world *w, slot_array *out) {
     return n;
 }
 
-static int grow_slots(sl_world *w, int need) {
+int sl__grow_slots(sl_world *w, int need) {
     if (need <= w->cap) return 1;
     if (need > w->max_particles) return 0;
     long long grown = w->cap > 0 ? w->cap : 1024;   /* wide, so doubling past 2^30 cannot overflow */
@@ -78,11 +78,32 @@ static int grow_slots(sl_world *w, int need) {
         *arrays[i].ptr = mem;
     }
 
-    int table = 1024;
-    while (table < (1 << 30) && table < 2LL * n) table <<= 1;
-    w->g.table_size = table;
     w->cap = n;
     return 1;
+}
+
+unsigned sl_version(void) { return (SLIME_VERSION_MAJOR << 16) | (SLIME_VERSION_MINOR << 8) | SLIME_VERSION_PATCH; }
+
+int sl_deterministic(void) {
+    sl_fpmode fpmode = sl_fp_enter();
+    /* Inputs are volatile so nothing is folded at compile time. */
+    volatile float one = 1.0f, inc = 1.0f / 4096.0f, tiny = 1.17549435e-38f;
+    float a = one + inc, c = -(one + 2.0f * inc);
+    int ok = a * a + c == 0.0f;   /* rounded twice; fused multiply-add would leave 2^-24 */
+    ok &= tiny * 0.5f != 0.0f;    /* subnormals kept, not flushed to zero */
+
+    /* slime's own math functions give these exact bits on every conforming build. */
+    volatile float in[] = {0.3f, -0.73f, 1.0f, 0.999f, 2.5f, -3.1f, 7.25f, 0.0625f, 100.0f};
+    uint64_t h = 0;
+    for (int i = 0; i < 9; i++) {
+        float x = in[i], s, co;
+        sl_sincos(x, &s, &co);
+        float vals[] = {sl_exp2(x), sl_log2(x > 0 ? x : -x), s, co, sl_cbrt(x > 0 ? x : -x), sl_pow(0.3f, x > 0 ? x : -x)};
+        for (int k = 0; k < 6; k++) h = (h ^ sl_bits(vals[k])) * 0x100000001b3ull;
+    }
+    ok &= h == 0x1f2362a7d3611078ull;
+    sl_fp_leave(fpmode);
+    return ok;
 }
 
 sl_world *sl_world_create(const sl_world_desc *desc) {
@@ -121,7 +142,7 @@ sl_world *sl_world_create(const sl_world_desc *desc) {
         if (!w->dpos || !w->dvel || !w->dlife || !w->dkind) { sl_world_destroy(w); return NULL; }
     }
 
-    if (!grow_slots(w, desc->max_particles < 1024 ? desc->max_particles : 1024)) { sl_world_destroy(w); return NULL; }
+    if (!sl__grow_slots(w, desc->max_particles < 1024 ? desc->max_particles : 1024)) { sl_world_destroy(w); return NULL; }
     if (!w->tasks.parallel_for && desc->workers > 1) {
         w->pool = sl__pool_create(w, desc->workers - 1);
         if (!w->pool) { sl_world_destroy(w); return NULL; }
@@ -137,7 +158,8 @@ void sl_world_destroy(sl_world *w) {
     for (int i = 0; i < count; i++) sl__free(w, *arrays[i].ptr);
     sl__free(w, w->g.start);
     sl__free(w, w->nbr);
-    sl__free(w, w->nbr_r);
+    sl__free(w, w->knbr);
+    sl__free(w, w->kdist);
     sl__free(w, w->contacts);
     sl__free(w, w->contact_tmp);
     sl__free(w, w->island_calm);
@@ -188,7 +210,7 @@ static sl_particle reissue(const sl_world *w, sl_particle old) {
 
 sl_particle sl_spawn(sl_world *w, sl_material m, sl_vec3 pos, sl_vec3 vel) {
     if (!w || m < 0 || m >= w->material_count || !v3_finite(pos) || !v3_finite(vel)) return -1;
-    if (w->count >= w->max_particles || !grow_slots(w, w->count + 1)) return -1;
+    if (w->count >= w->max_particles || !sl__grow_slots(w, w->count + 1)) return -1;
     int s = w->count++;
     int id = w->free_count > 0 ? reissue(w, w->free_ids[--w->free_count]) : w->next_id++;
     float d = w->spacing;
@@ -223,7 +245,7 @@ static float jitter(int i, int j, int k) {
     return (float)(h & 0xffff) / 65535.0f - 0.5f;
 }
 
-int sl_spawn_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max) {
+static int spawn_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max) {
     if (!w) return 0;
     float d = w->spacing, r = w->radius;
     int nx = (int)floorf((max.x - min.x - 2 * r) / d + 1e-4f) + 1;
@@ -242,6 +264,13 @@ int sl_spawn_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max) {
     return added;
 }
 
+int sl_spawn_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max) {
+    sl_fpmode fpmode = sl_fp_enter();
+    int added = spawn_box(w, m, min, max);
+    sl_fp_leave(fpmode);
+    return added;
+}
+
 /* Wakes are queued and done in one pass at the next step, so edits between steps never scan every particle. */
 static void queue_wake(sl_world *w, sl_vec3 lo, sl_vec3 hi) {
     if (w->wake_count == SL_MAX_WAKES) { w->wake_all = 1; return; }
@@ -254,8 +283,8 @@ static void queue_wake(sl_world *w, sl_vec3 lo, sl_vec3 hi) {
 static void queue_collider_wake(sl_world *w, const sl_collider_desc *d, sl_vec3 a, sl_vec3 b, float margin) {
     if (d->inside || d->shape == SL_PLANE) { w->wake_all = 1; return; }
     float reach = sl__bound_radius(d) + margin;
-    queue_wake(w, v3(fminf(a.x, b.x) - reach, fminf(a.y, b.y) - reach, fminf(a.z, b.z) - reach),
-               v3(fmaxf(a.x, b.x) + reach, fmaxf(a.y, b.y) + reach, fmaxf(a.z, b.z) + reach));
+    queue_wake(w, v3(sl_min(a.x, b.x) - reach, sl_min(a.y, b.y) - reach, sl_min(a.z, b.z) - reach),
+               v3(sl_max(a.x, b.x) + reach, sl_max(a.y, b.y) + reach, sl_max(a.z, b.z) + reach));
 }
 
 static void apply_wakes(sl_world *w) {
@@ -285,8 +314,8 @@ static void wake_marked(sl_world *w) {
     for (int s = 0; s < w->count; s++) {
         if (!w->mark[s]) continue;
         sl_vec3 x = w->x[s];
-        lo = v3(fminf(lo.x, x.x), fminf(lo.y, x.y), fminf(lo.z, x.z));
-        hi = v3(fmaxf(hi.x, x.x), fmaxf(hi.y, x.y), fmaxf(hi.z, x.z));
+        lo = v3(sl_min(lo.x, x.x), sl_min(lo.y, x.y), sl_min(lo.z, x.z));
+        hi = v3(sl_max(hi.x, x.x), sl_max(hi.y, x.y), sl_max(hi.z, x.z));
     }
     for (int s = 0; s < w->count; s++) {
         sl_vec3 x = w->x[s];
@@ -621,6 +650,7 @@ static void end_step(sl_world *w, int begin, int end, int chunk, void *ctx) {
 
 void sl_step(sl_world *w, float dt) {
     if (!w || !(dt > 0)) return;
+    sl_fpmode fpmode = sl_fp_enter();
 #ifdef SLIME_PROFILE
     double start = sl__now();
 #endif
@@ -667,6 +697,7 @@ void sl_step(sl_world *w, float dt) {
 #ifdef SLIME_PROFILE
     sl__prof[P_STEP] += sl__now() - start;
 #endif
+    sl_fp_leave(fpmode);
 }
 
 int sl_count(const sl_world *w) { return w ? w->count : 0; }
@@ -701,7 +732,7 @@ void sl_get_stats(const sl_world *w, sl_stats *out) {
     int count = slot_arrays((sl_world *)w, arrays);   /* only reads the table, nothing is written */
     size_t bytes = sizeof *w;
     for (int i = 0; i < count; i++) bytes += ((size_t)w->cap + (size_t)arrays[i].extra) * arrays[i].elem;
-    bytes += (size_t)w->g.start_cap * sizeof(int) + (size_t)w->nbr_cap * sizeof(int) + (size_t)w->nbr_r_cap * sizeof(float)
+    bytes += (size_t)w->g.start_cap * sizeof(int) + (size_t)w->nbr_cap * sizeof(int) + (size_t)w->knbr_cap * sizeof(int) + (size_t)w->kdist_cap * sizeof(float)
         + (size_t)(w->contact_cap + w->contact_tmp_cap) * sizeof(contact) + (size_t)w->island_cap * sizeof(int)
         + (size_t)w->mem_list_cap * sizeof(int) + (size_t)(w->dist_cap + w->dist_tmp_cap) * sizeof(dist_con)
         + (size_t)w->dist_lambda_cap * sizeof(float) + (size_t)w->member_cap * sizeof(member)

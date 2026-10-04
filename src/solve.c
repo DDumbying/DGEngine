@@ -11,8 +11,10 @@ static void predict(sl_world *w, int begin, int end, int chunk, void *ctx) {
 }
 
 /* Position based fluids: lambda is how hard each fluid particle pushes to get back to rest density.
-   Neighbors inside the kernel are moved to the front of the list with their distance, and w->order[i]
-   marks where they end, so the delta pass only visits those. */
+   Neighbors inside the kernel and their distances are copied to the start of the particle's range in knbr and
+   kdist, and w->order[i]
+   marks where they end, so the delta pass only visits those. The neighbor list itself is never reordered,
+   so it depends only on where it was built, which snapshots rely on. */
 static void fluid_lambda(sl_world *w, int begin, int end, int chunk, void *ctx) {
     (void)chunk; (void)ctx;
     float h = w->h, h2 = h * h, inv_rest = 1.0f / w->w_rest, eps = 0.2f / (w->spacing * w->spacing);
@@ -30,8 +32,8 @@ static void fluid_lambda(sl_world *w, int begin, int end, int chunk, void *ctx) 
             float r2 = v3_len2(d);
             if (r2 >= h2) continue;
             float r = sqrtf(r2);
-            if (n != in) { w->nbr[n] = w->nbr[in]; w->nbr[in] = j; }
-            w->nbr_r[in++] = r;
+            w->kdist[in] = r;
+            w->knbr[in++] = j;
             rho += kernel(r, h);
             if (r < 1e-9f) continue;
             sl_vec3 g = v3_scale(d, kernel_grad(r, h) * inv_rest / r);
@@ -78,8 +80,8 @@ static void fluid_delta(sl_world *w, int begin, int end, int chunk, void *ctx) {
                 dp = v3_scale(wall, li * inv_rest);
             }
             for (int n = w->nbr_off[i]; n < w->order[i]; n++) {
-                int j = w->nbr[n];
-                float r = w->nbr_r[n];
+                int j = w->knbr[n];
+                float r = w->kdist[n];
                 if (r < 1e-9f || (!(w->flags[j] & F_FLUID) && li == 0)) continue;
                 sl_vec3 d = v3_sub(pi, w->p[j]);
                 float l = li + ((w->flags[j] & F_FLUID) ? live_lambda(w, j) : 0.0f);
@@ -137,7 +139,7 @@ static void solve_contact_range(sl_world *w, int begin, int end, int chunk, void
         sl_vec3 tan = v3_sub(rel, v3_scale(n, v3_dot(rel, n)));
         float tl = v3_len(tan);
         if (tl <= 1e-9f) continue;
-        float f = tl < mu * pen ? 1.0f : fminf(mu * pen / tl, 1.0f);
+        float f = tl < mu * pen ? 1.0f : sl_min(mu * pen / tl, 1.0f);
         w->p[i] = v3_madd(w->p[i], tan, -f * wi / ws);
         w->p[j] = v3_madd(w->p[j], tan, f * wj / ws);
     }
@@ -291,7 +293,7 @@ void sl__fluid_step(sl_world *w) {
     for (int m = 0; m < w->material_count; m++) {
         const sl_material_desc *md = &w->materials[m];
         /* Viscosity is applied once per step, so it is compounded over the substeps it stands for. */
-        visc_step[m] = 1.0f - powf(1.0f - fminf(fmaxf(md->viscosity, 0.0f), 1.0f), (float)w->substeps);
+        visc_step[m] = 1.0f - sl_powi(1.0f - sl_min(sl_max(md->viscosity, 0.0f), 1.0f), w->substeps);
         if (md->kind != SL_FLUID) continue;
         extras |= md->viscosity > 0 || md->cohesion > 0 || md->vorticity > 0;
         vort |= md->vorticity > 0;

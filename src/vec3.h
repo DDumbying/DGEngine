@@ -1,7 +1,7 @@
 #ifndef SLIME_VEC3_H
 #define SLIME_VEC3_H
 
-#include <math.h>
+#include "dmath.h"   /* first, so its float settings cover everything after it */
 #include "slime/slime.h"
 
 static inline sl_vec3 v3(float x, float y, float z) { sl_vec3 r = {x, y, z}; return r; }
@@ -50,8 +50,9 @@ static inline quat q_mul(quat a, quat b) {
 }
 
 static inline quat q_axis_angle(sl_vec3 axis, float angle) {
-    float s = sinf(angle * 0.5f);
-    quat r = {axis.x * s, axis.y * s, axis.z * s, cosf(angle * 0.5f)};
+    float s, c;
+    sl_sincos(angle * 0.5f, &s, &c);
+    quat r = {axis.x * s, axis.y * s, axis.z * s, c};
     return r;
 }
 

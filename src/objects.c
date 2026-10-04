@@ -78,7 +78,7 @@ static sl_object finish(sl_world *w, int obj, int ok) {
 
 static int valid_material(const sl_world *w, sl_material m) { return w && m >= 0 && m < w->material_count; }
 
-sl_object sl_rope_create(sl_world *w, sl_material m, sl_vec3 a, sl_vec3 b, float compliance) {
+static sl_object rope_create(sl_world *w, sl_material m, sl_vec3 a, sl_vec3 b, float compliance) {
     if (!valid_material(w, m)) return -1;
     float len = v3_len(v3_sub(b, a));
     int n = (int)roundf(len / w->spacing) + 1;
@@ -86,7 +86,7 @@ sl_object sl_rope_create(sl_world *w, sl_material m, sl_vec3 a, sl_vec3 b, float
     int obj = new_object(w, OBJ_ROPE);
     if (obj < 0) return -1;
     float step = len / (float)(n - 1);
-    w->objects[obj].self_dist = fminf(w->spacing, 0.9f * step);
+    w->objects[obj].self_dist = sl_min(w->spacing, 0.9f * step);
     int ok = alloc_ids(w, obj, n);
     for (int i = 0; ok && i < n; i++) ok = spawn_into(w, obj, m, v3_lerp(a, b, (float)i / (float)(n - 1)));
     const sl_particle *ids = w->objects[obj].ids;
@@ -94,8 +94,8 @@ sl_object sl_rope_create(sl_world *w, sl_material m, sl_vec3 a, sl_vec3 b, float
     return finish(w, obj, ok);
 }
 
-sl_object sl_cloth_create(sl_world *w, sl_material m, sl_vec3 origin, sl_vec3 u, sl_vec3 v,
-                          float stretch_compliance, float bend_compliance) {
+static sl_object cloth_create(sl_world *w, sl_material m, sl_vec3 origin, sl_vec3 u, sl_vec3 v,
+                              float stretch_compliance, float bend_compliance) {
     if (!valid_material(w, m)) return -1;
     int nu = (int)roundf(v3_len(u) / w->spacing) + 1, nv = (int)roundf(v3_len(v) / w->spacing) + 1;
     if (nu < 2) nu = 2;
@@ -105,7 +105,7 @@ sl_object sl_cloth_create(sl_world *w, sl_material m, sl_vec3 origin, sl_vec3 u,
     object *o = &w->objects[obj];
     o->nu = nu;
     o->nv = nv;
-    o->self_dist = fminf(w->spacing, 0.9f * fminf(v3_len(u) / (float)(nu - 1), v3_len(v) / (float)(nv - 1)));
+    o->self_dist = sl_min(w->spacing, 0.9f * sl_min(v3_len(u) / (float)(nu - 1), v3_len(v) / (float)(nv - 1)));
     int ok = alloc_ids(w, obj, nu * nv);
     for (int j = 0; ok && j < nv; j++)
         for (int i = 0; ok && i < nu; i++)
@@ -132,8 +132,8 @@ sl_object sl_cloth_create(sl_world *w, sl_material m, sl_vec3 origin, sl_vec3 u,
 static int axis_blocks(int n) { return n <= 5 ? 1 : (n - 4) / 2 + 1; }
 static int block_hi(int n, int c) { return 2 * c + 4 < n - 1 ? 2 * c + 4 : n - 1; }
 
-sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max,
-                                 float stiffness, float plasticity) {
+static sl_object softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max,
+                                     float stiffness, float plasticity) {
     if (!valid_material(w, m)) return -1;
     float d = w->spacing, r = w->radius;
     int n[3] = {(int)floorf((max.x - min.x - 2 * r) / d + 1e-4f) + 1,
@@ -170,7 +170,7 @@ sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec
                 c->stiffness = stiffness < 0 ? 0 : (stiffness > 1 ? 1 : stiffness);
                 c->plasticity = plasticity < 0 ? 0 : (plasticity > 1 ? 1 : plasticity);
                 /* Applied every pass, so spread over all passes in a step to match the asked stiffness. */
-                c->pull = c->stiffness >= 1 ? 1.0f : 1.0f - powf(1.0f - c->stiffness, 1.0f / (float)(w->substeps * w->iterations));
+                c->pull = c->stiffness >= 1 ? 1.0f : 1.0f - sl_pow(1.0f - c->stiffness, 1.0f / (float)(w->substeps * w->iterations));
                 c->rot = q_identity();
                 sl_vec3 center = v3(0, 0, 0);
                 for (int k = lo[2]; k <= hi[2]; k++)
@@ -184,6 +184,30 @@ sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec
                 for (int q = c->first; q < c->first + size; q++) w->members[q].rest = v3_sub(w->members[q].rest, c->center);
             }
     return finish(w, obj, ok);
+}
+
+/* Object creation does float math, so it runs in slime's float mode like a step. */
+sl_object sl_rope_create(sl_world *w, sl_material m, sl_vec3 a, sl_vec3 b, float compliance) {
+    sl_fpmode fpmode = sl_fp_enter();
+    sl_object o = rope_create(w, m, a, b, compliance);
+    sl_fp_leave(fpmode);
+    return o;
+}
+
+sl_object sl_cloth_create(sl_world *w, sl_material m, sl_vec3 origin, sl_vec3 u, sl_vec3 v,
+                          float stretch_compliance, float bend_compliance) {
+    sl_fpmode fpmode = sl_fp_enter();
+    sl_object o = cloth_create(w, m, origin, u, v, stretch_compliance, bend_compliance);
+    sl_fp_leave(fpmode);
+    return o;
+}
+
+sl_object sl_softbody_create_box(sl_world *w, sl_material m, sl_vec3 min, sl_vec3 max,
+                                 float stiffness, float plasticity) {
+    sl_fpmode fpmode = sl_fp_enter();
+    sl_object o = softbody_create_box(w, m, min, max, stiffness, plasticity);
+    sl_fp_leave(fpmode);
+    return o;
 }
 
 void sl_object_destroy(sl_world *w, sl_object o) {
